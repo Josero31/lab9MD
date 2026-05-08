@@ -357,9 +357,15 @@ display: none;
 </div>
 
 
+<pre class="r"><code>if (!require(&quot;neuralnet&quot;)) install.packages(&quot;neuralnet&quot;, repos = &quot;https://cloud.r-project.org&quot;)</code></pre>
+<pre><code>## package &#39;neuralnet&#39; successfully unpacked and MD5 sums checked
+## 
+## The downloaded binary packages are in
+##  C:\Users\jrss3\AppData\Local\Temp\RtmpALoIkk\downloaded_packages</code></pre>
 <pre class="r"><code>library(tidyverse)
 library(caret)
-library(nnet)</code></pre>
+library(nnet)
+library(neuralnet)</code></pre>
 <div id="conjuntos-de-entrenamiento-y-prueba" class="section level2">
 <h2>1. Conjuntos de entrenamiento y prueba</h2>
 <p>Se utilizan los mismos conjuntos de entrenamiento y prueba definidos
@@ -453,6 +459,193 @@ cat(&quot;Registros en entrenamiento:&quot;, nrow(train_prep), &quot;\n&quot;)</
 <pre><code>## Registros en prueba:        599</code></pre>
 <pre class="r"><code>cat(&quot;Variables predictoras:     &quot;, ncol(train_prep) - 1, &quot;\n&quot;)</code></pre>
 <pre><code>## Variables predictoras:      19</code></pre>
+<hr />
+</div>
+<div id="modelos-de-redes-neuronales" class="section level2">
+<h2>3. Modelos de redes neuronales</h2>
+<p>Se generan dos modelos con <strong>topologías y funciones de
+activación distintas</strong>.</p>
+<div id="modelo-1-nnet-1-capa-oculta-activación-sigmoide-logística" class="section level3">
+<h3>Modelo 1 — <code>nnet</code>: 1 capa oculta, activación sigmoide
+(logística)</h3>
+<p>Topología: capa de entrada → <strong>5 neuronas ocultas</strong> →
+capa de salida (softmax). Función de activación oculta: <strong>sigmoide
+(logística)</strong>, la cual mapea cada neurona al intervalo (0, 1). Es
+la función por defecto de <code>nnet</code>. La capa de salida usa
+<strong>softmax</strong> para producir probabilidades de clase que sumen
+1.</p>
+<pre class="r"><code>library(nnet)
+set.seed(42)
+
+modelo1 &lt;- nnet(
+  precio_cat ~ .,
+  data   = train_prep,
+  size   = 5,        # 5 neuronas en la capa oculta
+  decay  = 0.01,     # regularización L2
+  maxit  = 500,
+  trace  = FALSE
+)
+
+cat(&quot;=== Modelo 1: nnet (sigmoide, 1 capa oculta con 5 neuronas) ===\n&quot;)</code></pre>
+<pre><code>## === Modelo 1: nnet (sigmoide, 1 capa oculta con 5 neuronas) ===</code></pre>
+<pre class="r"><code>cat(&quot;Pesos totales del modelo:&quot;, length(modelo1$wts), &quot;\n&quot;)</code></pre>
+<pre><code>## Pesos totales del modelo: 118</code></pre>
+<pre class="r"><code>cat(&quot;Valor del criterio de ajuste:&quot;, modelo1$value, &quot;\n&quot;)</code></pre>
+<pre><code>## Valor del criterio de ajuste: 1038.148</code></pre>
+</div>
+<div id="modelo-2-neuralnet-2-capas-ocultas-activación-tangente-hiperbólica" class="section level3">
+<h3>Modelo 2 — <code>neuralnet</code>: 2 capas ocultas, activación
+tangente hiperbólica</h3>
+<p>Topología: capa de entrada → <strong>6 neuronas</strong> → <strong>3
+neuronas</strong> → capa de salida. Función de activación oculta:
+<strong>tanh</strong>, que mapea cada neurona al intervalo (-1, 1). A
+diferencia de la sigmoide, está centrada en cero, lo que ayuda a evitar
+gradientes saturados y suele acelerar la convergencia. La variable
+respuesta se codifica en <strong>tres columnas binarias</strong> (una
+por clase) para que <code>neuralnet</code> pueda manejar clasificación
+multiclase.</p>
+<pre class="r"><code># Codificar la respuesta como tres columnas binarias (one-hot)
+y_train &lt;- model.matrix(~ precio_cat - 1, data = train_prep) |&gt; as.data.frame()
+y_test  &lt;- model.matrix(~ precio_cat - 1, data = test_prep)  |&gt; as.data.frame()
+
+colnames(y_train) &lt;- c(&quot;Barata&quot;, &quot;Media&quot;, &quot;Cara&quot;)
+colnames(y_test)  &lt;- c(&quot;Barata&quot;, &quot;Media&quot;, &quot;Cara&quot;)
+
+vars_pred &lt;- setdiff(names(train_prep), &quot;precio_cat&quot;)
+
+train_nn2 &lt;- cbind(train_prep[, vars_pred], y_train)
+test_nn2  &lt;- cbind(test_prep[, vars_pred],  y_test)
+
+formula_nn2 &lt;- as.formula(
+  paste(&quot;Barata + Media + Cara ~&quot;, paste(vars_pred, collapse = &quot; + &quot;))
+)
+
+set.seed(42)
+modelo2 &lt;- neuralnet(
+  formula_nn2,
+  data           = train_nn2,
+  hidden         = c(6, 3),   # 2 capas ocultas: 6 y 3 neuronas
+  act.fct        = &quot;tanh&quot;,    # activación tangente hiperbólica
+  linear.output  = FALSE,     # salida con activación (clasificación)
+  stepmax        = 1e6,
+  threshold      = 0.05
+)
+
+cat(&quot;=== Modelo 2: neuralnet (tanh, 2 capas ocultas: 6-3 neuronas) ===\n&quot;)</code></pre>
+<pre><code>## === Modelo 2: neuralnet (tanh, 2 capas ocultas: 6-3 neuronas) ===</code></pre>
+<pre class="r"><code>cat(&quot;Pasos hasta convergencia:&quot;, modelo2$result.matrix[&quot;steps&quot;, 1], &quot;\n&quot;)</code></pre>
+<pre><code>## Pasos hasta convergencia: 32521</code></pre>
+<pre class="r"><code>cat(&quot;Error final:             &quot;, modelo2$result.matrix[&quot;error&quot;, 1], &quot;\n&quot;)</code></pre>
+<pre><code>## Error final:              275.1811</code></pre>
+<hr />
+</div>
+</div>
+<div id="predicciones" class="section level2">
+<h2>4. Predicciones</h2>
+<pre class="r"><code># --- Modelo 1 ---
+pred1_train &lt;- predict(modelo1, newdata = train_prep, type = &quot;class&quot;) |&gt;
+  factor(levels = levels(train_prep$precio_cat))
+
+pred1_test  &lt;- predict(modelo1, newdata = test_prep,  type = &quot;class&quot;) |&gt;
+  factor(levels = levels(test_prep$precio_cat))
+
+# --- Modelo 2 ---
+# compute() devuelve probabilidades por clase; se toma la de mayor valor
+raw2_test  &lt;- neuralnet::compute(modelo2, test_nn2[, vars_pred])$net.result
+raw2_train &lt;- neuralnet::compute(modelo2, train_nn2[, vars_pred])$net.result
+
+clases &lt;- c(&quot;Barata&quot;, &quot;Media&quot;, &quot;Cara&quot;)
+
+pred2_test  &lt;- factor(clases[apply(raw2_test,  1, which.max)],
+                      levels = levels(test_prep$precio_cat))
+pred2_train &lt;- factor(clases[apply(raw2_train, 1, which.max)],
+                      levels = levels(train_prep$precio_cat))
+
+# Tabla resumen de exactitud
+resumen &lt;- data.frame(
+  Modelo        = c(&quot;Modelo 1 (nnet, sigmoide, 5)&quot;,
+                    &quot;Modelo 2 (neuralnet, tanh, 6-3)&quot;),
+  Acc_Train     = c(round(mean(pred1_train == train_prep$precio_cat), 4),
+                    round(mean(pred2_train == train_prep$precio_cat), 4)),
+  Acc_Test      = c(round(mean(pred1_test  == test_prep$precio_cat),  4),
+                    round(mean(pred2_test  == test_prep$precio_cat),  4))
+)
+print(resumen)</code></pre>
+<pre><code>##                            Modelo Acc_Train Acc_Test
+## 1    Modelo 1 (nnet, sigmoide, 5)    0.6883   0.6027
+## 2 Modelo 2 (neuralnet, tanh, 6-3)    0.7290   0.5927</code></pre>
+<hr />
+</div>
+<div id="matrices-de-confusión" class="section level2">
+<h2>5. Matrices de confusión</h2>
+<div id="modelo-1-nnet-sigmoide-1-capa-oculta-con-5-neuronas" class="section level3">
+<h3>Modelo 1 — nnet (sigmoide, 1 capa oculta con 5 neuronas)</h3>
+<pre class="r"><code>confusionMatrix(pred1_test, test_prep$precio_cat)</code></pre>
+<pre><code>## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction Barata Media Cara
+##     Barata    122    43   13
+##     Media      61    94   40
+##     Cara       18    63  145
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.6027          
+##                  95% CI : (0.5622, 0.6421)
+##     No Information Rate : 0.3356          
+##     P-Value [Acc &gt; NIR] : &lt; 2e-16         
+##                                           
+##                   Kappa : 0.4042          
+##                                           
+##  Mcnemar&#39;s Test P-Value : 0.02853         
+## 
+## Statistics by Class:
+## 
+##                      Class: Barata Class: Media Class: Cara
+## Sensitivity                 0.6070       0.4700      0.7323
+## Specificity                 0.8593       0.7469      0.7980
+## Pos Pred Value              0.6854       0.4821      0.6416
+## Neg Pred Value              0.8124       0.7376      0.8579
+## Prevalence                  0.3356       0.3339      0.3306
+## Detection Rate              0.2037       0.1569      0.2421
+## Detection Prevalence        0.2972       0.3255      0.3773
+## Balanced Accuracy           0.7331       0.6084      0.7652</code></pre>
+</div>
+<div id="modelo-2-neuralnet-tanh-2-capas-ocultas-6-3-neuronas" class="section level3">
+<h3>Modelo 2 — neuralnet (tanh, 2 capas ocultas: 6-3 neuronas)</h3>
+<pre class="r"><code>confusionMatrix(pred2_test, test_prep$precio_cat)</code></pre>
+<pre><code>## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction Barata Media Cara
+##     Barata    129    55   15
+##     Media      59    84   41
+##     Cara       13    61  142
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.5927          
+##                  95% CI : (0.5521, 0.6323)
+##     No Information Rate : 0.3356          
+##     P-Value [Acc &gt; NIR] : &lt;2e-16          
+##                                           
+##                   Kappa : 0.3891          
+##                                           
+##  Mcnemar&#39;s Test P-Value : 0.2402          
+## 
+## Statistics by Class:
+## 
+##                      Class: Barata Class: Media Class: Cara
+## Sensitivity                 0.6418       0.4200      0.7172
+## Specificity                 0.8241       0.7494      0.8155
+## Pos Pred Value              0.6482       0.4565      0.6574
+## Neg Pred Value              0.8200       0.7205      0.8538
+## Prevalence                  0.3356       0.3339      0.3306
+## Detection Rate              0.2154       0.1402      0.2371
+## Detection Prevalence        0.3322       0.3072      0.3606
+## Balanced Accuracy           0.7330       0.5847      0.7663</code></pre>
+</div>
 </div>
 
 

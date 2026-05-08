@@ -10,9 +10,12 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ```
 
 ```{r librerias}
+if (!require("neuralnet")) install.packages("neuralnet", repos = "https://cloud.r-project.org")
+
 library(tidyverse)
 library(caret)
 library(nnet)
+library(neuralnet)
 ```
 
 ## 1. Conjuntos de entrenamiento y prueba
@@ -106,4 +109,129 @@ test_prep  <- cbind(predict(prep, test_dummy),  precio_cat = datos_test$precio_c
 cat("Registros en entrenamiento:", nrow(train_prep), "\n")
 cat("Registros en prueba:       ", nrow(test_prep),  "\n")
 cat("Variables predictoras:     ", ncol(train_prep) - 1, "\n")
+```
+
+---
+
+## 3. Modelos de redes neuronales
+
+Se generan dos modelos con **topologías y funciones de activación distintas**.
+
+### Modelo 1 — `nnet`: 1 capa oculta, activación sigmoide (logística)
+
+Topología: capa de entrada → **5 neuronas ocultas** → capa de salida (softmax).
+Función de activación oculta: **sigmoide (logística)**, la cual mapea cada
+neurona al intervalo (0, 1). Es la función por defecto de `nnet`. La capa
+de salida usa **softmax** para producir probabilidades de clase que sumen 1.
+
+```{r modelo1-nnet}
+library(nnet)
+set.seed(42)
+
+modelo1 <- nnet(
+  precio_cat ~ .,
+  data   = train_prep,
+  size   = 5,        # 5 neuronas en la capa oculta
+  decay  = 0.01,     # regularización L2
+  maxit  = 500,
+  trace  = FALSE
+)
+
+cat("=== Modelo 1: nnet (sigmoide, 1 capa oculta con 5 neuronas) ===\n")
+cat("Pesos totales del modelo:", length(modelo1$wts), "\n")
+cat("Valor del criterio de ajuste:", modelo1$value, "\n")
+```
+
+### Modelo 2 — `neuralnet`: 2 capas ocultas, activación tangente hiperbólica
+
+Topología: capa de entrada → **6 neuronas** → **3 neuronas** → capa de salida.
+Función de activación oculta: **tanh**, que mapea cada neurona al intervalo
+(-1, 1). A diferencia de la sigmoide, está centrada en cero, lo que ayuda
+a evitar gradientes saturados y suele acelerar la convergencia.
+La variable respuesta se codifica en **tres columnas binarias** (una por
+clase) para que `neuralnet` pueda manejar clasificación multiclase.
+
+```{r modelo2-neuralnet}
+# Codificar la respuesta como tres columnas binarias (one-hot)
+y_train <- model.matrix(~ precio_cat - 1, data = train_prep) |> as.data.frame()
+y_test  <- model.matrix(~ precio_cat - 1, data = test_prep)  |> as.data.frame()
+
+colnames(y_train) <- c("Barata", "Media", "Cara")
+colnames(y_test)  <- c("Barata", "Media", "Cara")
+
+vars_pred <- setdiff(names(train_prep), "precio_cat")
+
+train_nn2 <- cbind(train_prep[, vars_pred], y_train)
+test_nn2  <- cbind(test_prep[, vars_pred],  y_test)
+
+formula_nn2 <- as.formula(
+  paste("Barata + Media + Cara ~", paste(vars_pred, collapse = " + "))
+)
+
+set.seed(42)
+modelo2 <- neuralnet(
+  formula_nn2,
+  data           = train_nn2,
+  hidden         = c(6, 3),   # 2 capas ocultas: 6 y 3 neuronas
+  act.fct        = "tanh",    # activación tangente hiperbólica
+  linear.output  = FALSE,     # salida con activación (clasificación)
+  stepmax        = 1e6,
+  threshold      = 0.05
+)
+
+cat("=== Modelo 2: neuralnet (tanh, 2 capas ocultas: 6-3 neuronas) ===\n")
+cat("Pasos hasta convergencia:", modelo2$result.matrix["steps", 1], "\n")
+cat("Error final:             ", modelo2$result.matrix["error", 1], "\n")
+```
+
+---
+
+## 4. Predicciones
+
+```{r predicciones}
+# --- Modelo 1 ---
+pred1_train <- predict(modelo1, newdata = train_prep, type = "class") |>
+  factor(levels = levels(train_prep$precio_cat))
+
+pred1_test  <- predict(modelo1, newdata = test_prep,  type = "class") |>
+  factor(levels = levels(test_prep$precio_cat))
+
+# --- Modelo 2 ---
+# compute() devuelve probabilidades por clase; se toma la de mayor valor
+raw2_test  <- neuralnet::compute(modelo2, test_nn2[, vars_pred])$net.result
+raw2_train <- neuralnet::compute(modelo2, train_nn2[, vars_pred])$net.result
+
+clases <- c("Barata", "Media", "Cara")
+
+pred2_test  <- factor(clases[apply(raw2_test,  1, which.max)],
+                      levels = levels(test_prep$precio_cat))
+pred2_train <- factor(clases[apply(raw2_train, 1, which.max)],
+                      levels = levels(train_prep$precio_cat))
+
+# Tabla resumen de exactitud
+resumen <- data.frame(
+  Modelo        = c("Modelo 1 (nnet, sigmoide, 5)",
+                    "Modelo 2 (neuralnet, tanh, 6-3)"),
+  Acc_Train     = c(round(mean(pred1_train == train_prep$precio_cat), 4),
+                    round(mean(pred2_train == train_prep$precio_cat), 4)),
+  Acc_Test      = c(round(mean(pred1_test  == test_prep$precio_cat),  4),
+                    round(mean(pred2_test  == test_prep$precio_cat),  4))
+)
+print(resumen)
+```
+
+---
+
+## 5. Matrices de confusión
+
+### Modelo 1 — nnet (sigmoide, 1 capa oculta con 5 neuronas)
+
+```{r cm-modelo1}
+confusionMatrix(pred1_test, test_prep$precio_cat)
+```
+
+### Modelo 2 — neuralnet (tanh, 2 capas ocultas: 6-3 neuronas)
+
+```{r cm-modelo2}
+confusionMatrix(pred2_test, test_prep$precio_cat)
 ```
