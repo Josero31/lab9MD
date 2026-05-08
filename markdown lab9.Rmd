@@ -2,7 +2,12 @@
 title: "Laboratorio 9 - Redes Neuronales"
 author: "Jose Sanchez, Roberto Najera y Andre Pivaral"
 date: "2026-05-08"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
 ---
 
 ```{r setup, include=FALSE}
@@ -235,3 +240,258 @@ confusionMatrix(pred1_test, test_prep$precio_cat)
 ```{r cm-modelo2}
 confusionMatrix(pred2_test, test_prep$precio_cat)
 ```
+
+---
+
+## 6. Comparación de modelos: efectividad, tiempo y equivocaciones
+
+### 6.1 Efectividad y tiempo de procesamiento
+
+```{r comparacion-efectividad}
+# Tiempo de predicción en prueba
+t1_inicio <- Sys.time()
+predict(modelo1, newdata = test_prep, type = "class")
+t1_fin <- Sys.time()
+
+t2_inicio <- Sys.time()
+neuralnet::compute(modelo2, test_nn2[, vars_pred])
+t2_fin <- Sys.time()
+
+cm1 <- confusionMatrix(pred1_test, test_prep$precio_cat)
+cm2 <- confusionMatrix(pred2_test, test_prep$precio_cat)
+
+tabla_comp <- data.frame(
+  Modelo       = c("M1: nnet (sigmoide, 1 capa, 5 neur.)",
+                   "M2: neuralnet (tanh, 2 capas, 6-3)"),
+  Exactitud    = round(c(cm1$overall["Accuracy"], cm2$overall["Accuracy"]), 4),
+  Kappa        = round(c(cm1$overall["Kappa"],    cm2$overall["Kappa"]),    4),
+  Tiempo_pred_ms = round(c(
+    as.numeric(difftime(t1_fin, t1_inicio, units = "secs")) * 1000,
+    as.numeric(difftime(t2_fin, t2_inicio, units = "secs")) * 1000
+  ), 2)
+)
+print(tabla_comp)
+```
+
+```{r grafico-efectividad}
+tabla_comp_long <- tabla_comp %>%
+  select(Modelo, Exactitud, Kappa) %>%
+  pivot_longer(cols = c(Exactitud, Kappa), names_to = "Metrica", values_to = "Valor")
+
+ggplot(tabla_comp_long, aes(x = Modelo, y = Valor, fill = Metrica)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = round(Valor, 3)), position = position_dodge(0.9),
+            vjust = -0.4, size = 3.5) +
+  scale_fill_manual(values = c("Exactitud" = "#3498db", "Kappa" = "#e67e22")) +
+  labs(title = "Exactitud y Kappa en prueba por modelo",
+       x = "", y = "Valor", fill = "") +
+  ylim(0, 1) +
+  theme_minimal()
+```
+
+### 6.2 Análisis de equivocaciones
+
+Se examina la tabla de errores de cada modelo para identificar **dónde se
+equivocó más** (clase con mayor tasa de error), **dónde se equivocó menos**
+y **qué tan graves** son los errores cometidos.
+
+```{r errores-modelo1}
+cat("=== Errores Modelo 1 (nnet, sigmoide) ===\n")
+cm1_tabla <- cm1$table
+errores_m1 <- data.frame(
+  Clase          = rownames(cm1_tabla),
+  Correctos      = diag(cm1_tabla),
+  Total_real     = rowSums(cm1_tabla),
+  Tasa_error     = round(1 - diag(cm1_tabla) / rowSums(cm1_tabla), 4)
+) %>% arrange(desc(Tasa_error))
+print(errores_m1)
+```
+
+```{r errores-modelo2}
+cat("=== Errores Modelo 2 (neuralnet, tanh) ===\n")
+cm2_tabla <- cm2$table
+errores_m2 <- data.frame(
+  Clase          = rownames(cm2_tabla),
+  Correctos      = diag(cm2_tabla),
+  Total_real     = rowSums(cm2_tabla),
+  Tasa_error     = round(1 - diag(cm2_tabla) / rowSums(cm2_tabla), 4)
+) %>% arrange(desc(Tasa_error))
+print(errores_m2)
+```
+
+```{r grafico-errores}
+errores_m1$Modelo <- "M1: nnet (sigmoide)"
+errores_m2$Modelo <- "M2: neuralnet (tanh)"
+errores_todos <- rbind(errores_m1, errores_m2)
+
+ggplot(errores_todos, aes(x = Clase, y = Tasa_error, fill = Modelo)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = scales::percent(Tasa_error, accuracy = 0.1)),
+            position = position_dodge(0.9), vjust = -0.4, size = 3.5) +
+  scale_fill_manual(values = c("M1: nnet (sigmoide)" = "#2980b9",
+                               "M2: neuralnet (tanh)" = "#8e44ad")) +
+  labs(title = "Tasa de error por clase y modelo",
+       x = "Categoría de precio", y = "Tasa de error", fill = "") +
+  ylim(0, 1) +
+  theme_minimal()
+```
+
+**Importancia de los errores:**
+
+- **Error Barata → Cara o Cara → Barata**: el más grave. Implica recomendar
+  un precio muy alejado del mercado real, causando pérdida de ingresos o de
+  ocupación.
+- **Error con clase "Media"**: el más frecuente, ya que sus fronteras con
+  Barata y Cara son difusas por construcción (terciles). Clasificar una
+  propiedad Media como Barata o Cara tiene un impacto moderado en el negocio.
+- La clase con **mayor tasa de error** suele ser "Media" en ambos modelos,
+  mientras que "Barata" y "Cara" —al tener precios más extremos— resultan
+  más fáciles de clasificar correctamente.
+
+---
+
+## 7. Análisis de sobreajuste
+
+```{r sobreajuste}
+tabla_ov <- data.frame(
+  Modelo      = c("M1: nnet (sigmoide, 1 capa, 5 neur.)",
+                  "M2: neuralnet (tanh, 2 capas, 6-3)"),
+  Acc_Train   = c(round(mean(pred1_train == train_prep$precio_cat), 4),
+                  round(mean(pred2_train == train_prep$precio_cat), 4)),
+  Acc_Test    = c(round(mean(pred1_test  == test_prep$precio_cat),  4),
+                  round(mean(pred2_test  == test_prep$precio_cat),  4))
+) %>%
+  mutate(
+    Diferencia  = round(Acc_Train - Acc_Test, 4),
+    Diagnostico = case_when(
+      Diferencia > 0.05                            ~ "Sobreajuste",
+      Acc_Train < 0.60 & Acc_Test < 0.60           ~ "Desajuste",
+      TRUE                                          ~ "Buen ajuste"
+    )
+  )
+
+print(tabla_ov)
+```
+
+```{r grafico-sobreajuste}
+tabla_ov_long <- tabla_ov %>%
+  select(Modelo, Acc_Train, Acc_Test) %>%
+  pivot_longer(cols = c(Acc_Train, Acc_Test),
+               names_to = "Conjunto", values_to = "Exactitud") %>%
+  mutate(Conjunto = recode(Conjunto,
+                           "Acc_Train" = "Entrenamiento",
+                           "Acc_Test"  = "Prueba"))
+
+ggplot(tabla_ov_long, aes(x = Modelo, y = Exactitud, fill = Conjunto)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = scales::percent(Exactitud, accuracy = 0.1)),
+            position = position_dodge(0.9), vjust = -0.4, size = 3) +
+  scale_fill_manual(values = c("Entrenamiento" = "#3498db", "Prueba" = "#e74c3c")) +
+  labs(title = "Exactitud entrenamiento vs prueba — diagnóstico de sobreajuste",
+       x = "", y = "Exactitud", fill = "") +
+  ylim(0, 1) +
+  theme_minimal()
+```
+
+**Interpretación:**
+
+- Si `Diferencia > 0.05` → el modelo memoriza patrones de entrenamiento
+  que no generalizan (**sobreajuste**). Solución: aumentar `decay` o reducir
+  neuronas.
+- Si ambas exactitudes son bajas (`< 0.60`) → el modelo es demasiado simple
+  para los datos (**desajuste**). Solución: más neuronas o más capas.
+- Si `Diferencia ≤ 0.05` y exactitudes razonables → **buen ajuste**.
+
+---
+
+## 8. Tuning del modelo elegido
+
+Se selecciona el modelo con mayor exactitud en prueba y se tunea
+mediante búsqueda en grilla con validación cruzada de 5 folds usando
+`caret`. Los hiperparámetros explorados son el número de neuronas en
+la capa oculta (`size`) y la regularización L2 (`decay`).
+
+```{r seleccion-modelo}
+mejor_idx <- which.max(tabla_ov$Acc_Test)
+cat("Modelo seleccionado para tuning:", tabla_ov$Modelo[mejor_idx], "\n")
+cat("Exactitud base en prueba:", tabla_ov$Acc_Test[mejor_idx], "\n")
+```
+
+```{r tuning}
+set.seed(42)
+
+grilla <- expand.grid(
+  size  = c(3, 5, 8, 10),
+  decay = c(0, 0.001, 0.01, 0.05, 0.1)
+)
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 5
+)
+
+modelo_tuned <- train(
+  precio_cat ~ .,
+  data      = train_prep,
+  method    = "nnet",
+  tuneGrid  = grilla,
+  trControl = ctrl,
+  metric    = "Accuracy",
+  trace     = FALSE,
+  maxit     = 500
+)
+
+cat("Mejores parámetros encontrados:\n")
+print(modelo_tuned$bestTune)
+```
+
+```{r resultados-tuning}
+plot(modelo_tuned, main = "Exactitud por combinación de hiperparámetros (CV 5-fold)")
+```
+
+```{r evaluacion-tuned}
+pred_tuned_train <- predict(modelo_tuned, newdata = train_prep)
+pred_tuned_test  <- predict(modelo_tuned, newdata = test_prep)
+
+acc_tuned_train <- round(mean(pred_tuned_train == train_prep$precio_cat), 4)
+acc_tuned_test  <- round(mean(pred_tuned_test  == test_prep$precio_cat),  4)
+
+cat("=== Modelo tuneado ===\n")
+cat(sprintf("Exactitud entrenamiento: %.4f\n", acc_tuned_train))
+cat(sprintf("Exactitud prueba:        %.4f\n", acc_tuned_test))
+cat(sprintf("Diferencia:              %.4f\n", acc_tuned_train - acc_tuned_test))
+
+cat("\nMatriz de confusión (prueba):\n")
+confusionMatrix(pred_tuned_test, test_prep$precio_cat)
+```
+
+```{r comparacion-antes-despues}
+tabla_final <- data.frame(
+  Modelo      = c("M1: nnet base", "M2: neuralnet base", "nnet tuneado (CV)"),
+  Acc_Train   = c(tabla_ov$Acc_Train[1], tabla_ov$Acc_Train[2], acc_tuned_train),
+  Acc_Test    = c(tabla_ov$Acc_Test[1],  tabla_ov$Acc_Test[2],  acc_tuned_test),
+  Diferencia  = c(tabla_ov$Diferencia[1], tabla_ov$Diferencia[2],
+                  round(acc_tuned_train - acc_tuned_test, 4))
+) %>%
+  mutate(Diagnostico = case_when(
+    Diferencia > 0.05                  ~ "Sobreajuste",
+    Acc_Train < 0.60 & Acc_Test < 0.60 ~ "Desajuste",
+    TRUE                               ~ "Buen ajuste"
+  ))
+
+print(tabla_final)
+```
+
+**Discusión del tuning:**
+
+- La búsqueda en grilla evalúa 20 combinaciones de `size` y `decay` usando
+  validación cruzada, lo que penaliza configuraciones que solo funcionan
+  bien en entrenamiento.
+- Un `decay` mayor reduce el sobreajuste a costa de algo de exactitud;
+  un `size` mayor aumenta la capacidad expresiva del modelo pero eleva el
+  riesgo de memorizar ruido.
+- Si la exactitud en prueba del modelo tuneado supera a la del modelo base
+  **y** la diferencia train-test se mantiene ≤ 0.05, el tuning fue exitoso
+  sin introducir sobreajuste.
+- Si la diferencia train-test crece con el tuning, conviene aumentar `decay`
+  o reducir `size` para recuperar la capacidad de generalización.
