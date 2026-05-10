@@ -853,3 +853,219 @@ print(tabla_ov_reg)
 
 ---
 
+
+## 13. Tuning del modelo de regresión seleccionado
+
+Se selecciona el modelo de regresión con menor RMSE en prueba y se optimizan
+sus hiperparámetros mediante búsqueda en grilla con validación cruzada de 5
+folds. Se exploran combinaciones de número de neuronas (`size`) y
+regularización L2 (`decay`).
+
+```{r seleccion-modelo-reg}
+mejor_reg_idx <- which.min(tabla_ov_reg$RMSE_Test)
+cat("Modelo seleccionado para tuning (regresión):",
+    tabla_ov_reg$Modelo[mejor_reg_idx], "\n")
+cat("RMSE base en prueba:",
+    tabla_ov_reg$RMSE_Test[mejor_reg_idx], "\n")
+```
+
+```{r tuning-regresion}
+set.seed(42)
+
+grilla_reg <- expand.grid(
+  size  = c(5, 8, 10, 15),
+  decay = c(0, 0.001, 0.01, 0.05, 0.1)
+)
+
+ctrl_reg <- trainControl(
+  method = "cv",
+  number = 5
+)
+
+modelo_reg_tuned <- train(
+  price ~ .,
+  data      = train_reg_prep,
+  method    = "nnet",
+  tuneGrid  = grilla_reg,
+  trControl = ctrl_reg,
+  metric    = "RMSE",
+  linout    = TRUE,
+  trace     = FALSE,
+  maxit     = 500
+)
+
+cat("Mejores parámetros encontrados:\n")
+print(modelo_reg_tuned$bestTune)
+```
+
+```{r resultados-tuning-reg}
+plot(modelo_reg_tuned,
+     main = "RMSE por combinación de hiperparámetros (CV 5-fold)")
+```
+
+```{r evaluacion-tuned-reg}
+pred_rt_train <- predict(modelo_reg_tuned, newdata = train_reg_prep)
+pred_rt_test  <- predict(modelo_reg_tuned, newdata = test_reg_prep)
+
+m_rt_train <- metricas_reg(train_reg_prep$price, pred_rt_train)
+m_rt_test  <- metricas_reg(test_reg_prep$price,  pred_rt_test)
+
+tabla_tuned_reg <- data.frame(
+  Modelo   = c("R1 base", "R2 base", "nnet tuneado (CV)"),
+  Conjunto = "Prueba",
+  RMSE = c(tabla_ov_reg$RMSE_Test[1],
+            tabla_ov_reg$RMSE_Test[2],
+            m_rt_test["RMSE"]),
+  MAE  = c(metricas_reg(test_reg_prep$price, pred_r1_test)["MAE"],
+            metricas_reg(test_reg_prep$price, pred_r2_test)["MAE"],
+            m_rt_test["MAE"]),
+  R2   = c(metricas_reg(test_reg_prep$price, pred_r1_test)["R2"],
+            metricas_reg(test_reg_prep$price, pred_r2_test)["R2"],
+            m_rt_test["R2"])
+)
+print(tabla_tuned_reg)
+```
+
+```{r sobreajuste-tuned-reg}
+cat(sprintf("=== Modelo tuneado ===\n"))
+cat(sprintf("RMSE entrenamiento: %.4f\n",
+            metricas_reg(train_reg_prep$price, pred_rt_train)["RMSE"]))
+cat(sprintf("RMSE prueba:        %.4f\n",  m_rt_test["RMSE"]))
+cat(sprintf("Ratio Test/Train:   %.4f\n",
+            m_rt_test["RMSE"] /
+              metricas_reg(train_reg_prep$price, pred_rt_train)["RMSE"]))
+```
+
+**Discusión del tuning de regresión:**
+
+- La validación cruzada de 5 folds evalúa el RMSE en datos no vistos durante
+  el entrenamiento, penalizando configuraciones que solo minimicen el error
+  interno.
+- Un `decay` mayor reduce la varianza (sobreajuste) pero puede elevar el
+  sesgo; un `size` mayor aumenta la expresividad pero requiere más
+  regularización.
+- Si el RMSE en prueba del modelo tuneado es menor que el de los modelos base
+  **y** el ratio Test/Train se mantiene cerca de 1.0, el tuning mejoró el
+  modelo sin introducir sobreajuste adicional.
+
+---
+
+## 14. Comparación del mejor modelo RNA con algoritmos anteriores
+
+Se comparan las métricas del mejor modelo RNA de regresión y del mejor de
+clasificación con los resultados obtenidos en entregas previas. Para que la
+comparación sea válida se usa el mismo conjunto de prueba en todos los
+modelos.
+
+> **Nota:** los valores de las entregas anteriores deben sustituirse por los
+> resultados reales de cada hoja de trabajo. Los valores incluidos a
+> continuación son marcadores de posición (`NA`) que deben completarse con
+> las métricas correspondientes.
+
+### 14.1 Comparación de modelos de regresión (predicción del precio)
+
+```{r comparacion-regresion-global}
+# ── Completa estas columnas con los resultados de entregas anteriores ──
+comparacion_reg <- data.frame(
+  Algoritmo        = c("Árbol de Regresión",
+                       "Random Forest",
+                       "KNN",
+                       "Regresión Lineal",
+                       "SVR",
+                       "Bayes Ingenuo",
+                       "RNA — nnet tuneado"),
+  RMSE             = c(NA, NA, NA, NA, NA, NA,
+                       round(m_rt_test["RMSE"], 4)),
+  MAE              = c(NA, NA, NA, NA, NA, NA,
+                       round(m_rt_test["MAE"], 4)),
+  R2               = c(NA, NA, NA, NA, NA, NA,
+                       round(m_rt_test["R2"], 4)),
+  Tiempo_train_s   = c(NA, NA, NA, NA, NA, NA,
+                       round(as.numeric(difftime(
+                         t_r1_train_fin, t_r1_train_inicio,
+                         units = "secs")), 2))
+)
+
+print(comparacion_reg)
+```
+
+```{r grafico-comparacion-reg}
+# Visualización con los datos disponibles (RNA)
+comparacion_reg_plot <- comparacion_reg %>%
+  filter(!is.na(RMSE)) %>%
+  pivot_longer(cols = c(RMSE, MAE, R2),
+               names_to = "Metrica", values_to = "Valor")
+
+if (nrow(comparacion_reg_plot) > 0) {
+  ggplot(comparacion_reg_plot,
+         aes(x = reorder(Algoritmo, Valor), y = Valor, fill = Algoritmo)) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = round(Valor, 3)), hjust = -0.1, size = 3.5) +
+    facet_wrap(~ Metrica, scales = "free_x") +
+    coord_flip() +
+    labs(title = "Comparación de modelos de regresión — métricas en prueba",
+         x = "Algoritmo", y = "Valor") +
+    theme_minimal()
+}
+```
+
+### 14.2 Comparación de modelos de clasificación (categoría de precio)
+
+```{r comparacion-clasificacion-global}
+# ── Completa estas columnas con los resultados de entregas anteriores ──
+comparacion_clas <- data.frame(
+  Algoritmo    = c("Árbol de Decisión",
+                   "Random Forest",
+                   "KNN",
+                   "Regresión Logística",
+                   "SVM",
+                   "Bayes Ingenuo",
+                   "RNA — nnet tuneado"),
+  Exactitud    = c(NA, NA, NA, NA, NA, NA,
+                   round(acc_tuned_test, 4)),
+  Kappa        = c(NA, NA, NA, NA, NA, NA,
+                   round(confusionMatrix(
+                     predict(modelo_tuned, newdata = test_prep),
+                     test_prep$precio_cat)$overall["Kappa"], 4)),
+  Tiempo_pred_ms = c(NA, NA, NA, NA, NA, NA, NA)
+)
+
+print(comparacion_clas)
+```
+
+```{r grafico-comparacion-clas}
+comparacion_clas_plot <- comparacion_clas %>%
+  filter(!is.na(Exactitud)) %>%
+  pivot_longer(cols = c(Exactitud, Kappa),
+               names_to = "Metrica", values_to = "Valor")
+
+if (nrow(comparacion_clas_plot) > 0) {
+  ggplot(comparacion_clas_plot,
+         aes(x = reorder(Algoritmo, Valor), y = Valor, fill = Metrica)) +
+    geom_col(position = "dodge") +
+    geom_text(aes(label = round(Valor, 3)),
+              position = position_dodge(0.9), vjust = -0.4, size = 3.5) +
+    scale_fill_manual(values = c("Exactitud" = "#3498db", "Kappa" = "#e67e22")) +
+    labs(title = "Comparación de modelos de clasificación — exactitud y Kappa",
+         x = "Algoritmo", y = "Valor", fill = "") +
+    ylim(0, 1) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 15, hjust = 1))
+}
+```
+
+**Conclusiones de la comparación:**
+
+- En **regresión**, el criterio principal es el RMSE en el conjunto de prueba
+  (menor es mejor). Se consideran también MAE y R² para evaluar la magnitud y
+  dirección del error. El tiempo de entrenamiento es relevante para
+  implementaciones en producción.
+- En **clasificación**, la exactitud y el coeficiente Kappa (que corrige el
+  azar) determinan el mejor modelo. Kappa es especialmente útil cuando las
+  clases no están balanceadas.
+- Las RNA son competitivas cuando el número de observaciones es suficiente
+  para estimar bien los pesos. Con conjuntos pequeños o ruidosos, modelos
+  más simples (Random Forest, KNN) suelen generalizar mejor.
+- Se debe actualizar la tabla `comparacion_reg` y `comparacion_clas` con los
+  valores reales de las entregas anteriores para obtener la comparación
+  definitiva.
