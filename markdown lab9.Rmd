@@ -495,3 +495,152 @@ print(tabla_final)
   sin introducir sobreajuste.
 - Si la diferencia train-test crece con el tuning, conviene aumentar `decay`
   o reducir `size` para recuperar la capacidad de generalización.
+  
+  
+  
+---
+
+## 9. Variable respuesta: precio numérico
+
+Para los modelos de regresión se vuelve a incluir la variable `price` como
+respuesta continua, manteniendo exactamente el mismo subconjunto de
+observaciones y la misma partición 70/30 definidos anteriormente.
+
+```{r datos-regresion}
+load("listings.RData")
+
+columnas_reg <- c("price", "room_type", "neighbourhood_group_cleansed",
+                  "accommodates", "bathrooms", "bedrooms", "beds",
+                  "number_of_reviews", "review_scores_rating",
+                  "availability_365", "minimum_nights")
+columnas_reg_ok <- intersect(columnas_reg, names(listings))
+
+listings_reg <- listings %>%
+  select(all_of(columnas_reg_ok)) %>%
+  drop_na()
+
+if (is.character(listings_reg$price)) {
+  listings_reg$price <- as.numeric(gsub("[$,]", "", listings_reg$price))
+}
+listings_reg$price <- as.numeric(listings_reg$price)
+listings_reg <- listings_reg %>%
+  filter(price > 0,
+         price <= quantile(price, 0.99, na.rm = TRUE))
+
+if ("minimum_nights" %in% names(listings_reg)) {
+  listings_reg <- listings_reg %>%
+    filter(minimum_nights <= quantile(minimum_nights, 0.99, na.rm = TRUE))
+}
+
+# Submuestreo con la misma semilla para reproducibilidad
+set.seed(42)
+n_max_reg <- 2000
+if (nrow(listings_reg) > n_max_reg) {
+  idx_reg <- sample(nrow(listings_reg), n_max_reg)
+  listings_reg <- listings_reg[idx_reg, ]
+}
+
+# Partición 70/30 con set.seed(42)
+set.seed(42)
+idx_train_reg   <- createDataPartition(listings_reg$price, p = 0.7, list = FALSE)
+datos_train_reg <- listings_reg[ idx_train_reg, ]
+datos_test_reg  <- listings_reg[-idx_train_reg, ]
+
+# Codificación dummy y normalización
+dummy_reg      <- dummyVars(price ~ ., data = listings_reg, fullRank = TRUE)
+train_reg_d    <- predict(dummy_reg, newdata = datos_train_reg) |> as.data.frame()
+test_reg_d     <- predict(dummy_reg, newdata = datos_test_reg)  |> as.data.frame()
+colnames(train_reg_d) <- make.names(colnames(train_reg_d))
+colnames(test_reg_d)  <- make.names(colnames(test_reg_d))
+
+prep_reg        <- preProcess(train_reg_d, method = c("center", "scale"))
+train_reg_prep  <- cbind(predict(prep_reg, train_reg_d),
+                         price = datos_train_reg$price)
+test_reg_prep   <- cbind(predict(prep_reg, test_reg_d),
+                          price = datos_test_reg$price)
+
+cat("Registros en entrenamiento (regresión):", nrow(train_reg_prep), "\n")
+cat("Registros en prueba (regresión):       ", nrow(test_reg_prep),  "\n")
+cat("Variables predictoras:                 ", ncol(train_reg_prep) - 1, "\n")
+cat("Rango de precio — train: [",
+    round(min(train_reg_prep$price), 2), ",",
+    round(max(train_reg_prep$price), 2), "]\n")
+```
+
+---
+
+## 10. Modelos de regresión con redes neuronales
+
+Se construyen dos modelos con **topologías y funciones de activación
+distintas**, ambos con salida lineal (`linear.output = TRUE` o equivalente
+en `nnet`) para que la predicción no quede acotada.
+
+### Modelo R1 — `nnet`: 1 capa oculta (8 neuronas), activación logística
+
+Topología: entrada → **8 neuronas ocultas** → salida lineal.
+La función de activación de las neuronas ocultas es la **sigmoide
+logística**; la capa de salida es **lineal** (sin activación), lo que
+permite predecir valores continuos sin restricción de rango. Se aplica
+regularización L2 (`decay = 0.01`) para controlar el sobreajuste.
+
+```{r modelo-reg1}
+set.seed(42)
+
+t_r1_train_inicio <- Sys.time()
+modelo_reg1 <- nnet(
+  price ~ .,
+  data      = train_reg_prep,
+  size      = 8,          # 8 neuronas en la capa oculta
+  decay     = 0.01,       # regularización L2
+  linout    = TRUE,       # salida lineal para regresión
+  maxit     = 500,
+  trace     = FALSE
+)
+t_r1_train_fin <- Sys.time()
+
+cat("=== Modelo R1: nnet (sigmoide, 1 capa, 8 neuronas) ===\n")
+cat("Pesos totales:         ", length(modelo_reg1$wts), "\n")
+cat("Criterio de ajuste:    ", round(modelo_reg1$value, 4), "\n")
+cat("Tiempo de entrenamiento:",
+    round(as.numeric(difftime(t_r1_train_fin, t_r1_train_inicio,
+                              units = "secs")), 2), "s\n")
+```
+
+### Modelo R2 — `neuralnet`: 2 capas ocultas (10-5 neuronas), activación tanh
+
+Topología: entrada → **10 neuronas** → **5 neuronas** → salida lineal.
+La función de activación es la **tangente hiperbólica (tanh)**, centrada en
+cero, lo que suele acelerar el aprendizaje al reducir la saturación de
+gradientes. La salida es lineal (`linear.output = TRUE`).
+
+```{r modelo-reg2}
+vars_pred_reg <- setdiff(names(train_reg_prep), "price")
+
+formula_reg2 <- as.formula(
+  paste("price ~", paste(vars_pred_reg, collapse = " + "))
+)
+
+set.seed(42)
+t_r2_train_inicio <- Sys.time()
+modelo_reg2 <- neuralnet(
+  formula_reg2,
+  data          = train_reg_prep,
+  hidden        = c(10, 5),   # 2 capas ocultas: 10 y 5 neuronas
+  act.fct       = "tanh",     # tangente hiperbólica
+  linear.output = TRUE,       # salida lineal (regresión)
+  stepmax       = 1e6,
+  threshold     = 0.5
+)
+t_r2_train_fin <- Sys.time()
+
+cat("=== Modelo R2: neuralnet (tanh, 2 capas: 10-5 neuronas) ===\n")
+cat("Pasos hasta convergencia:",
+    modelo_reg2$result.matrix["steps", 1], "\n")
+cat("Error final:             ",
+    round(modelo_reg2$result.matrix["error", 1], 4), "\n")
+cat("Tiempo de entrenamiento: ",
+    round(as.numeric(difftime(t_r2_train_fin, t_r2_train_inicio,
+                              units = "secs")), 2), "s\n")
+```
+
+---
