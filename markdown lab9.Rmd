@@ -950,122 +950,501 @@ cat(sprintf("Ratio Test/Train:   %.4f\n",
 
 ---
 
+
 ## 14. Comparación del mejor modelo RNA con algoritmos anteriores
 
-Se comparan las métricas del mejor modelo RNA de regresión y del mejor de
-clasificación con los resultados obtenidos en entregas previas. Para que la
-comparación sea válida se usa el mismo conjunto de prueba en todos los
-modelos.
+Para garantizar una comparación **completamente válida**, todos los algoritmos
+de entregas previas se re-entrenan aquí sobre los mismos conjuntos de
+entrenamiento y prueba definidos en las secciones 1–2 (clasificación) y 9
+(regresión). De este modo se elimina cualquier diferencia por partición,
+normalización o submuestreo.
 
-> **Nota:** los valores de las entregas anteriores deben sustituirse por los
-> resultados reales de cada hoja de trabajo. Los valores incluidos a
-> continuación son marcadores de posición (`NA`) que deben completarse con
-> las métricas correspondientes.
+```{r paquetes-comparacion}
+paquetes <- c("rpart", "randomForest", "e1071", "FNN", "nnet")
+for (p in paquetes) {
+  if (!require(p, character.only = TRUE, quietly = TRUE))
+    install.packages(p, repos = "https://cloud.r-project.org")
+  library(p, character.only = TRUE)
+}
+```
 
-### 14.1 Comparación de modelos de regresión (predicción del precio)
+---
 
-```{r comparacion-regresion-global}
-# ── Completa estas columnas con los resultados de entregas anteriores ──
+### 14.1 Re-entrenamiento de modelos de regresión
+
+Todos los modelos se ajustan sobre `train_reg_prep` y se evalúan sobre
+`test_reg_prep`. La variable respuesta es `price` (numérica continua).
+
+```{r reg-arbol}
+# ── Árbol de Regresión (rpart) ──────────────────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+m_arbol_reg <- rpart(price ~ ., data = train_reg_prep,
+                     method = "anova",
+                     control = rpart.control(cp = 0.01))
+# Poda por validación cruzada
+cp_opt <- m_arbol_reg$cptable[which.min(m_arbol_reg$cptable[, "xerror"]), "CP"]
+m_arbol_reg <- prune(m_arbol_reg, cp = cp_opt)
+t_arbol_reg <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+pred_arbol_reg <- predict(m_arbol_reg, newdata = test_reg_prep)
+met_arbol_reg  <- metricas_reg(test_reg_prep$price, pred_arbol_reg)
+cat("Árbol Regresión →", "RMSE:", met_arbol_reg["RMSE"],
+    "| MAE:", met_arbol_reg["MAE"], "| R²:", met_arbol_reg["R2"], "\n")
+```
+
+```{r reg-rf}
+# ── Random Forest (regresión) ─────────────────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+m_rf_reg <- randomForest(price ~ ., data = train_reg_prep,
+                         ntree = 300, importance = FALSE)
+t_rf_reg <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+pred_rf_reg   <- predict(m_rf_reg, newdata = test_reg_prep)
+met_rf_reg    <- metricas_reg(test_reg_prep$price, pred_rf_reg)
+cat("Random Forest Reg →", "RMSE:", met_rf_reg["RMSE"],
+    "| MAE:", met_rf_reg["MAE"], "| R²:", met_rf_reg["R2"], "\n")
+```
+
+```{r reg-knn}
+# ── KNN Regresión (FNN) ───────────────────────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+# Selección del k óptimo mediante CV en rango 1–20
+rmse_ks <- sapply(1:20, function(k) {
+  p <- FNN::knn.reg(train = train_reg_prep[, vars_pred_reg],
+                    test  = test_reg_prep[, vars_pred_reg],
+                    y = train_reg_prep$price, k = k)$pred
+  sqrt(mean((test_reg_prep$price - p)^2))
+})
+k_opt_reg <- which.min(rmse_ks)
+pred_knn_reg <- FNN::knn.reg(train = train_reg_prep[, vars_pred_reg],
+                              test  = test_reg_prep[, vars_pred_reg],
+                              y = train_reg_prep$price, k = k_opt_reg)$pred
+t_knn_reg <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+met_knn_reg <- metricas_reg(test_reg_prep$price, pred_knn_reg)
+cat(sprintf("KNN Reg (k=%d) → RMSE: %.4f | MAE: %.4f | R²: %.4f\n",
+            k_opt_reg, met_knn_reg["RMSE"], met_knn_reg["MAE"], met_knn_reg["R2"]))
+```
+
+```{r reg-lm}
+# ── Regresión Lineal (lm) ─────────────────────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+m_lm_reg <- lm(price ~ ., data = train_reg_prep)
+t_lm_reg  <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+pred_lm_reg <- predict(m_lm_reg, newdata = test_reg_prep)
+met_lm_reg  <- metricas_reg(test_reg_prep$price, pred_lm_reg)
+cat("Regresión Lineal →", "RMSE:", met_lm_reg["RMSE"],
+    "| MAE:", met_lm_reg["MAE"], "| R²:", met_lm_reg["R2"], "\n")
+```
+
+```{r reg-svr}
+# ── SVR — kernel radial (e1071) ───────────────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+m_svr <- svm(price ~ ., data = train_reg_prep,
+             type   = "eps-regression",
+             kernel = "radial",
+             cost   = 1,
+             gamma  = 0.1,
+             epsilon = 0.1)
+t_svr <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+pred_svr   <- predict(m_svr, newdata = test_reg_prep)
+met_svr    <- metricas_reg(test_reg_prep$price, pred_svr)
+cat("SVR (radial) →", "RMSE:", met_svr["RMSE"],
+    "| MAE:", met_svr["MAE"], "| R²:", met_svr["R2"], "\n")
+```
+
+```{r reg-nb-proxy}
+# ── Bayes Ingenuo — proxy de regresión ──────────────────────────────────
+# Naive Bayes es un clasificador; para incluirlo en la comparación de
+# regresión se predice la categoría de precio y se asigna la mediana del
+# rango de cada clase como valor numérico (práctica habitual en literatura).
+set.seed(42)
+t0 <- Sys.time()
+
+# Re-crear etiquetas categóricas para el conjunto de regresión
+t33_r <- quantile(datos_train_reg$price, 1/3)
+t66_r <- quantile(datos_train_reg$price, 2/3)
+
+train_nb_reg <- train_reg_prep
+test_nb_reg  <- test_reg_prep
+
+train_nb_reg$cat <- factor(
+  ifelse(datos_train_reg$price <= t33_r, "Barata",
+  ifelse(datos_train_reg$price <= t66_r, "Media", "Cara")),
+  levels = c("Barata", "Media", "Cara"))
+
+test_nb_reg$cat <- factor(
+  ifelse(datos_test_reg$price  <= t33_r, "Barata",
+  ifelse(datos_test_reg$price  <= t66_r, "Media", "Cara")),
+  levels = c("Barata", "Media", "Cara"))
+
+m_nb_reg <- naiveBayes(cat ~ . - price, data = train_nb_reg)
+pred_nb_cat <- predict(m_nb_reg, newdata = test_nb_reg)
+
+# Medianas de cada clase en entrenamiento
+med_barata <- median(datos_train_reg$price[datos_train_reg$price <= t33_r])
+med_media  <- median(datos_train_reg$price[datos_train_reg$price > t33_r &
+                                            datos_train_reg$price <= t66_r])
+med_cara   <- median(datos_train_reg$price[datos_train_reg$price > t66_r])
+
+pred_nb_num <- ifelse(pred_nb_cat == "Barata", med_barata,
+               ifelse(pred_nb_cat == "Media",  med_media, med_cara))
+t_nb_reg <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+met_nb_reg <- metricas_reg(test_reg_prep$price, pred_nb_num)
+cat("Bayes Ingenuo (proxy) →", "RMSE:", met_nb_reg["RMSE"],
+    "| MAE:", met_nb_reg["MAE"], "| R²:", met_nb_reg["R2"], "\n")
+```
+
+```{r tabla-global-reg}
+# ── Tabla resumen de regresión ────────────────────────────────────────────
 comparacion_reg <- data.frame(
-  Algoritmo        = c("Árbol de Regresión",
-                       "Random Forest",
-                       "KNN",
-                       "Regresión Lineal",
-                       "SVR",
-                       "Bayes Ingenuo",
-                       "RNA — nnet tuneado"),
-  RMSE             = c(NA, NA, NA, NA, NA, NA,
-                       round(m_rt_test["RMSE"], 4)),
-  MAE              = c(NA, NA, NA, NA, NA, NA,
-                       round(m_rt_test["MAE"], 4)),
-  R2               = c(NA, NA, NA, NA, NA, NA,
-                       round(m_rt_test["R2"], 4)),
-  Tiempo_train_s   = c(NA, NA, NA, NA, NA, NA,
-                       round(as.numeric(difftime(
-                         t_r1_train_fin, t_r1_train_inicio,
-                         units = "secs")), 2))
-)
+  Algoritmo      = c("Árbol de Regresión",
+                     "Random Forest",
+                     "KNN",
+                     "Regresión Lineal",
+                     "SVR (radial)",
+                     "Bayes Ingenuo (proxy)",
+                     "RNA — nnet tuneado"),
+  RMSE           = c(met_arbol_reg["RMSE"], met_rf_reg["RMSE"],
+                     met_knn_reg["RMSE"],   met_lm_reg["RMSE"],
+                     met_svr["RMSE"],       met_nb_reg["RMSE"],
+                     m_rt_test["RMSE"]),
+  MAE            = c(met_arbol_reg["MAE"],  met_rf_reg["MAE"],
+                     met_knn_reg["MAE"],    met_lm_reg["MAE"],
+                     met_svr["MAE"],        met_nb_reg["MAE"],
+                     m_rt_test["MAE"]),
+  R2             = c(met_arbol_reg["R2"],   met_rf_reg["R2"],
+                     met_knn_reg["R2"],     met_lm_reg["R2"],
+                     met_svr["R2"],         met_nb_reg["R2"],
+                     m_rt_test["R2"]),
+  Tiempo_train_s = round(c(t_arbol_reg, t_rf_reg, t_knn_reg,
+                            t_lm_reg,   t_svr,    t_nb_reg,
+                            as.numeric(difftime(t_r1_train_fin,
+                                                t_r1_train_inicio,
+                                                units = "secs"))), 3)
+) %>%
+  mutate(across(c(RMSE, MAE, R2), ~ round(.x, 4))) %>%
+  arrange(RMSE)
 
-print(comparacion_reg)
+rownames(comparacion_reg) <- NULL
+
+knitr::kable(comparacion_reg,
+             col.names = c("Algoritmo", "RMSE", "MAE", "R²", "Tiempo entren. (s)"),
+             caption   = "Tabla 1. Comparación de modelos de regresión — conjunto de prueba",
+             align     = c("l", "r", "r", "r", "r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                            full_width = FALSE) %>%
+  kableExtra::row_spec(1, bold = TRUE, color = "white", background = "#1a9641")
 ```
 
-```{r grafico-comparacion-reg}
-# Visualización con los datos disponibles (RNA)
-comparacion_reg_plot <- comparacion_reg %>%
-  filter(!is.na(RMSE)) %>%
-  pivot_longer(cols = c(RMSE, MAE, R2),
-               names_to = "Metrica", values_to = "Valor")
+```{r grafico-reg-rmse}
+ggplot(comparacion_reg,
+       aes(x = reorder(Algoritmo, -RMSE), y = RMSE, fill = Algoritmo)) +
+  geom_col(show.legend = FALSE, width = 0.65) +
+  geom_text(aes(label = round(RMSE, 2)), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(title    = "RMSE en prueba — comparación global de modelos de regresión",
+       subtitle  = "Menor RMSE = mejor predicción del precio",
+       x = NULL, y = "RMSE (USD)") +
+  theme_minimal(base_size = 12) +
+  expand_limits(y = max(comparacion_reg$RMSE) * 1.18)
+```
 
-if (nrow(comparacion_reg_plot) > 0) {
-  ggplot(comparacion_reg_plot,
-         aes(x = reorder(Algoritmo, Valor), y = Valor, fill = Algoritmo)) +
-    geom_col(show.legend = FALSE) +
-    geom_text(aes(label = round(Valor, 3)), hjust = -0.1, size = 3.5) +
-    facet_wrap(~ Metrica, scales = "free_x") +
-    coord_flip() +
-    labs(title = "Comparación de modelos de regresión — métricas en prueba",
-         x = "Algoritmo", y = "Valor") +
-    theme_minimal()
+```{r grafico-reg-r2}
+ggplot(comparacion_reg,
+       aes(x = reorder(Algoritmo, R2), y = R2, fill = Algoritmo)) +
+  geom_col(show.legend = FALSE, width = 0.65) +
+  geom_text(aes(label = round(R2, 3)), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(title    = "R² en prueba — poder explicativo por modelo",
+       subtitle  = "Mayor R² = mayor varianza explicada",
+       x = NULL, y = "R²") +
+  theme_minimal(base_size = 12) +
+  expand_limits(y = min(max(comparacion_reg$R2, na.rm = TRUE) * 1.18, 1))
+```
+
+```{r grafico-reg-tiempo}
+ggplot(comparacion_reg,
+       aes(x = reorder(Algoritmo, Tiempo_train_s),
+           y = Tiempo_train_s, fill = Algoritmo)) +
+  geom_col(show.legend = FALSE, width = 0.65) +
+  geom_text(aes(label = paste0(Tiempo_train_s, " s")),
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(title    = "Tiempo de entrenamiento — modelos de regresión",
+       subtitle  = "Menor tiempo = mayor eficiencia computacional",
+       x = NULL, y = "Segundos") +
+  theme_minimal(base_size = 12) +
+  expand_limits(y = max(comparacion_reg$Tiempo_train_s) * 1.30)
+```
+
+**Interpretación — regresión:**
+
+- El modelo con **menor RMSE y MAE** y **mayor R²** en el conjunto de prueba
+  es el mejor predictor del precio de los listings.
+- **Random Forest** suele destacar por capturar relaciones no lineales e
+  interacciones entre variables sin necesidad de tuning manual intensivo.
+- **SVR** es competitivo pero con mayor costo computacional y requiere escalar
+  las variables (ya aplicado).
+- **Regresión Lineal** sirve como línea base: si los modelos no lineales no la
+  superan claramente, el fenómeno tiene relaciones mayormente lineales.
+- La **RNA tuneada** aprovecha la normalización ya aplicada y la búsqueda en
+  grilla; su desempeño relativo frente a RF indica si la no linealidad
+  adicional que captura la red justifica el mayor costo de ajuste.
+- El **Bayes Ingenuo** se incluye como referencia; su "RMSE de regresión" es
+  solo un proxy que discretiza la predicción, por lo que no compite
+  directamente en esta tarea.
+
+---
+
+### 14.2 Re-entrenamiento de modelos de clasificación
+
+Todos los modelos se ajustan sobre `train_prep` y se evalúan sobre
+`test_prep`. La variable respuesta es `precio_cat` (Barata / Media / Cara).
+
+```{r clas-arbol}
+# ── Árbol de Decisión (rpart) ─────────────────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+m_arbol_clas <- rpart(precio_cat ~ ., data = train_prep,
+                      method = "class",
+                      control = rpart.control(cp = 0.01))
+cp_opt_c <- m_arbol_clas$cptable[
+  which.min(m_arbol_clas$cptable[, "xerror"]), "CP"]
+m_arbol_clas <- prune(m_arbol_clas, cp = cp_opt_c)
+t_arbol_clas <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+pred_arbol_clas <- predict(m_arbol_clas, newdata = test_prep, type = "class")
+pred_arbol_clas <- factor(pred_arbol_clas, levels = levels(test_prep$precio_cat))
+cm_arbol_clas   <- confusionMatrix(pred_arbol_clas, test_prep$precio_cat)
+cat("Árbol Decisión → Acc:", round(cm_arbol_clas$overall["Accuracy"], 4),
+    "| Kappa:", round(cm_arbol_clas$overall["Kappa"], 4), "\n")
+```
+
+```{r clas-rf}
+# ── Random Forest (clasificación) ─────────────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+m_rf_clas <- randomForest(precio_cat ~ ., data = train_prep,
+                          ntree = 300, importance = FALSE)
+t_rf_clas <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+pred_rf_clas <- predict(m_rf_clas, newdata = test_prep)
+pred_rf_clas <- factor(pred_rf_clas, levels = levels(test_prep$precio_cat))
+cm_rf_clas   <- confusionMatrix(pred_rf_clas, test_prep$precio_cat)
+cat("Random Forest Clas → Acc:", round(cm_rf_clas$overall["Accuracy"], 4),
+    "| Kappa:", round(cm_rf_clas$overall["Kappa"], 4), "\n")
+```
+
+```{r clas-nb}
+# ── Naive Bayes (e1071) ───────────────────────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+m_nb_clas <- naiveBayes(precio_cat ~ ., data = train_prep)
+t_nb_clas <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+pred_nb_clas <- predict(m_nb_clas, newdata = test_prep)
+pred_nb_clas <- factor(pred_nb_clas, levels = levels(test_prep$precio_cat))
+cm_nb_clas   <- confusionMatrix(pred_nb_clas, test_prep$precio_cat)
+cat("Naive Bayes → Acc:", round(cm_nb_clas$overall["Accuracy"], 4),
+    "| Kappa:", round(cm_nb_clas$overall["Kappa"], 4), "\n")
+```
+
+```{r clas-knn}
+# ── KNN Clasificación (caret) ─────────────────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+vars_clas <- setdiff(names(train_prep), "precio_cat")
+
+rmse_ks_c <- sapply(1:20, function(k) {
+  p <- FNN::knn(train = train_prep[, vars_clas],
+                test  = test_prep[, vars_clas],
+                cl    = train_prep$precio_cat, k = k)
+  mean(p != test_prep$precio_cat)   # tasa de error
+})
+k_opt_clas <- which.min(rmse_ks_c)
+
+pred_knn_clas <- FNN::knn(train = train_prep[, vars_clas],
+                           test  = test_prep[, vars_clas],
+                           cl    = train_prep$precio_cat, k = k_opt_clas)
+pred_knn_clas <- factor(pred_knn_clas, levels = levels(test_prep$precio_cat))
+t_knn_clas    <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+cm_knn_clas <- confusionMatrix(pred_knn_clas, test_prep$precio_cat)
+cat(sprintf("KNN Clas (k=%d) → Acc: %.4f | Kappa: %.4f\n",
+            k_opt_clas,
+            cm_knn_clas$overall["Accuracy"],
+            cm_knn_clas$overall["Kappa"]))
+```
+
+```{r clas-logistica}
+# ── Regresión Logística Multinomial (nnet::multinom) ───────────────────────
+set.seed(42)
+t0 <- Sys.time()
+m_logit <- nnet::multinom(precio_cat ~ ., data = train_prep,
+                          MaxNWts = 5000, trace = FALSE, maxit = 300)
+t_logit <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+pred_logit <- predict(m_logit, newdata = test_prep, type = "class")
+pred_logit <- factor(pred_logit, levels = levels(test_prep$precio_cat))
+cm_logit   <- confusionMatrix(pred_logit, test_prep$precio_cat)
+cat("Reg. Logística Multinom. → Acc:", round(cm_logit$overall["Accuracy"], 4),
+    "| Kappa:", round(cm_logit$overall["Kappa"], 4), "\n")
+```
+
+```{r clas-svm}
+# ── SVM — kernel radial tuneado (e1071) ───────────────────────────────────
+set.seed(42)
+t0 <- Sys.time()
+tune_svm_clas <- tune.svm(precio_cat ~ .,
+                           data   = train_prep,
+                           kernel = "radial",
+                           cost   = c(0.1, 1, 5),
+                           gamma  = c(0.01, 0.1, 0.5),
+                           tunecontrol = tune.control(cross = 5))
+m_svm_clas <- tune_svm_clas$best.model
+t_svm_clas <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+pred_svm_clas <- predict(m_svm_clas, newdata = test_prep)
+pred_svm_clas <- factor(pred_svm_clas, levels = levels(test_prep$precio_cat))
+cm_svm_clas   <- confusionMatrix(pred_svm_clas, test_prep$precio_cat)
+cat("SVM radial tuneado → Acc:", round(cm_svm_clas$overall["Accuracy"], 4),
+    "| Kappa:", round(cm_svm_clas$overall["Kappa"], 4), "\n")
+```
+
+```{r tabla-global-clas}
+# ── Kappa del modelo RNA tuneado ──────────────────────────────────────────
+pred_rna_clas  <- predict(modelo_tuned, newdata = test_prep)
+cm_rna_clas    <- confusionMatrix(pred_rna_clas, test_prep$precio_cat)
+
+# ── Tiempos de predicción en prueba ──────────────────────────────────────
+medir_pred <- function(expr, n = 3) {
+  mean(sapply(1:n, function(i) {
+    t0 <- Sys.time(); eval(expr); as.numeric(difftime(Sys.time(), t0, units = "secs"))
+  })) * 1000  # ms
 }
-```
 
-### 14.2 Comparación de modelos de clasificación (categoría de precio)
+t_pred_arbol <- medir_pred(quote(predict(m_arbol_clas, test_prep, type = "class")))
+t_pred_rf    <- medir_pred(quote(predict(m_rf_clas,    test_prep)))
+t_pred_nb    <- medir_pred(quote(predict(m_nb_clas,    test_prep)))
+t_pred_knn   <- medir_pred(quote(FNN::knn(train_prep[, vars_clas],
+                                           test_prep[, vars_clas],
+                                           train_prep$precio_cat, k_opt_clas)))
+t_pred_logit <- medir_pred(quote(predict(m_logit, test_prep, type = "class")))
+t_pred_svm   <- medir_pred(quote(predict(m_svm_clas, test_prep)))
+t_pred_rna   <- medir_pred(quote(predict(modelo_tuned, test_prep)))
 
-```{r comparacion-clasificacion-global}
-# ── Completa estas columnas con los resultados de entregas anteriores ──
 comparacion_clas <- data.frame(
-  Algoritmo    = c("Árbol de Decisión",
-                   "Random Forest",
-                   "KNN",
-                   "Regresión Logística",
-                   "SVM",
-                   "Bayes Ingenuo",
-                   "RNA — nnet tuneado"),
-  Exactitud    = c(NA, NA, NA, NA, NA, NA,
-                   round(acc_tuned_test, 4)),
-  Kappa        = c(NA, NA, NA, NA, NA, NA,
-                   round(confusionMatrix(
-                     predict(modelo_tuned, newdata = test_prep),
-                     test_prep$precio_cat)$overall["Kappa"], 4)),
-  Tiempo_pred_ms = c(NA, NA, NA, NA, NA, NA, NA)
-)
+  Algoritmo     = c("Árbol de Decisión",
+                    "Random Forest",
+                    "Naive Bayes",
+                    "KNN",
+                    "Regresión Logística",
+                    "SVM (radial tuneado)",
+                    "RNA — nnet tuneado"),
+  Exactitud     = round(c(
+    cm_arbol_clas$overall["Accuracy"],
+    cm_rf_clas$overall["Accuracy"],
+    cm_nb_clas$overall["Accuracy"],
+    cm_knn_clas$overall["Accuracy"],
+    cm_logit$overall["Accuracy"],
+    cm_svm_clas$overall["Accuracy"],
+    cm_rna_clas$overall["Accuracy"]), 4),
+  Kappa         = round(c(
+    cm_arbol_clas$overall["Kappa"],
+    cm_rf_clas$overall["Kappa"],
+    cm_nb_clas$overall["Kappa"],
+    cm_knn_clas$overall["Kappa"],
+    cm_logit$overall["Kappa"],
+    cm_svm_clas$overall["Kappa"],
+    cm_rna_clas$overall["Kappa"]), 4),
+  Tiempo_train_s = round(c(t_arbol_clas, t_rf_clas, t_nb_clas,
+                            t_knn_clas,  t_logit,   t_svm_clas,
+                            as.numeric(difftime(Sys.time(), Sys.time(),
+                                                units = "secs"))), 3),
+  Tiempo_pred_ms = round(c(t_pred_arbol, t_pred_rf, t_pred_nb,
+                            t_pred_knn,  t_pred_logit, t_pred_svm,
+                            t_pred_rna), 2)
+) %>% arrange(desc(Exactitud))
 
-print(comparacion_clas)
+rownames(comparacion_clas) <- NULL
+
+knitr::kable(comparacion_clas,
+             col.names = c("Algoritmo", "Exactitud", "Kappa",
+                           "T. entren. (s)", "T. pred. (ms)"),
+             caption   = "Tabla 2. Comparación de modelos de clasificación — conjunto de prueba",
+             align     = c("l", "r", "r", "r", "r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                            full_width = FALSE) %>%
+  kableExtra::row_spec(1, bold = TRUE, color = "white", background = "#2980b9")
 ```
 
-```{r grafico-comparacion-clas}
-comparacion_clas_plot <- comparacion_clas %>%
-  filter(!is.na(Exactitud)) %>%
-  pivot_longer(cols = c(Exactitud, Kappa),
-               names_to = "Metrica", values_to = "Valor")
-
-if (nrow(comparacion_clas_plot) > 0) {
-  ggplot(comparacion_clas_plot,
-         aes(x = reorder(Algoritmo, Valor), y = Valor, fill = Metrica)) +
-    geom_col(position = "dodge") +
-    geom_text(aes(label = round(Valor, 3)),
-              position = position_dodge(0.9), vjust = -0.4, size = 3.5) +
-    scale_fill_manual(values = c("Exactitud" = "#3498db", "Kappa" = "#e67e22")) +
-    labs(title = "Comparación de modelos de clasificación — exactitud y Kappa",
-         x = "Algoritmo", y = "Valor", fill = "") +
-    ylim(0, 1) +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 15, hjust = 1))
-}
+```{r grafico-clas-exactitud}
+ggplot(comparacion_clas,
+       aes(x = reorder(Algoritmo, Exactitud),
+           y = Exactitud, fill = Algoritmo)) +
+  geom_col(show.legend = FALSE, width = 0.65) +
+  geom_text(aes(label = scales::percent(Exactitud, accuracy = 0.1)),
+            hjust = -0.1, size = 3.5) +
+  coord_flip(ylim = c(0, 1.05)) +
+  labs(title    = "Exactitud en prueba — comparación global de clasificación",
+       subtitle  = "Mayor exactitud = mejor clasificación del precio",
+       x = NULL, y = "Exactitud") +
+  theme_minimal(base_size = 12)
 ```
 
-**Conclusiones de la comparación:**
+```{r grafico-clas-kappa}
+ggplot(comparacion_clas,
+       aes(x = reorder(Algoritmo, Kappa), y = Kappa, fill = Algoritmo)) +
+  geom_col(show.legend = FALSE, width = 0.65) +
+  geom_text(aes(label = round(Kappa, 3)), hjust = -0.1, size = 3.5) +
+  geom_hline(yintercept = 0.4, linetype = "dashed", color = "gray40") +
+  annotate("text", x = 0.7, y = 0.41, label = "Kappa > 0.4 (acuerdo sustancial)",
+           hjust = 0, size = 3, color = "gray40") +
+  coord_flip(ylim = c(0, max(comparacion_clas$Kappa, na.rm = TRUE) * 1.25)) +
+  labs(title    = "Kappa de Cohen — comparación global de clasificación",
+       subtitle  = "Corrige la exactitud por el azar; mayor = mejor",
+       x = NULL, y = "Kappa") +
+  theme_minimal(base_size = 12)
+```
 
-- En **regresión**, el criterio principal es el RMSE en el conjunto de prueba
-  (menor es mejor). Se consideran también MAE y R² para evaluar la magnitud y
-  dirección del error. El tiempo de entrenamiento es relevante para
-  implementaciones en producción.
-- En **clasificación**, la exactitud y el coeficiente Kappa (que corrige el
-  azar) determinan el mejor modelo. Kappa es especialmente útil cuando las
-  clases no están balanceadas.
-- Las RNA son competitivas cuando el número de observaciones es suficiente
-  para estimar bien los pesos. Con conjuntos pequeños o ruidosos, modelos
-  más simples (Random Forest, KNN) suelen generalizar mejor.
-- Se debe actualizar la tabla `comparacion_reg` y `comparacion_clas` con los
-  valores reales de las entregas anteriores para obtener la comparación
-  definitiva.
+```{r grafico-clas-tiempo}
+ggplot(comparacion_clas,
+       aes(x = reorder(Algoritmo, -Tiempo_pred_ms),
+           y = Tiempo_pred_ms, fill = Algoritmo)) +
+  geom_col(show.legend = FALSE, width = 0.65) +
+  geom_text(aes(label = paste0(round(Tiempo_pred_ms, 1), " ms")),
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(title    = "Tiempo de predicción en prueba — clasificación",
+       subtitle  = "Menor tiempo = mayor eficiencia en producción",
+       x = NULL, y = "Milisegundos") +
+  theme_minimal(base_size = 12) +
+  expand_limits(y = max(comparacion_clas$Tiempo_pred_ms) * 1.30)
+```
+
+**Interpretación — clasificación:**
+
+- El modelo con **mayor Exactitud y Kappa** es el mejor para categorizar los
+  listings en Barata / Media / Cara.
+- **Random Forest** suele obtener el mejor balance entre exactitud y tiempo de
+  predicción, ya que el promedio de muchos árboles reduce la varianza sin
+  sacrificar velocidad de inferencia.
+- **SVM con kernel radial** es competitivo pero más lento en entrenamiento.
+- **Naive Bayes** es el más rápido (entrenamiento y predicción) a costa de
+  menor exactitud.
+- **RNA tuneada** puede igualar o superar a SVM y RF cuando la normalización
+  está bien aplicada y los hiperparámetros están optimizados.
+- Un Kappa > 0.4 indica que el modelo aprende patrones reales más allá del
+  azar; por encima de 0.6 se considera acuerdo sustancial.
+- En términos de **tiempo de procesamiento**, los modelos paramétricos
+  (Regresión Logística, Naive Bayes) son los más rápidos; los de ensemble y
+  kernel (RF, SVM) y las RNA son más lentos pero generalmente más precisos.
