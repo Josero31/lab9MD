@@ -644,3 +644,212 @@ cat("Tiempo de entrenamiento: ",
 ```
 
 ---
+
+
+
+## 11. Comparación de los modelos de regresión
+
+Se evalúa cada modelo con las métricas estándar de regresión: **RMSE**
+(error cuadrático medio), **MAE** (error absoluto medio) y **R²**
+(coeficiente de determinación), tanto en entrenamiento como en prueba.
+
+```{r metricas-regresion}
+# Función auxiliar
+metricas_reg <- function(real, pred) {
+  rmse <- sqrt(mean((real - pred)^2))
+  mae  <- mean(abs(real - pred))
+  ss_res <- sum((real - pred)^2)
+  ss_tot <- sum((real - mean(real))^2)
+  r2   <- 1 - ss_res / ss_tot
+  c(RMSE = round(rmse, 4), MAE = round(mae, 4), R2 = round(r2, 4))
+}
+
+# --- Predicciones Modelo R1 ---
+pred_r1_train <- predict(modelo_reg1, newdata = train_reg_prep)
+pred_r1_test  <- predict(modelo_reg1, newdata = test_reg_prep)
+
+# --- Predicciones Modelo R2 ---
+pred_r2_train <- neuralnet::compute(modelo_reg2,
+                                    train_reg_prep[, vars_pred_reg])$net.result[, 1]
+pred_r2_test  <- neuralnet::compute(modelo_reg2,
+                                    test_reg_prep[, vars_pred_reg])$net.result[, 1]
+
+# Tabla de métricas
+tabla_reg <- data.frame(
+  Modelo    = rep(c("R1: nnet (sigmoide, 8 neur.)",
+                    "R2: neuralnet (tanh, 10-5)"), each = 2),
+  Conjunto  = rep(c("Entrenamiento", "Prueba"), times = 2),
+  rbind(
+    metricas_reg(train_reg_prep$price, pred_r1_train),
+    metricas_reg(test_reg_prep$price,  pred_r1_test),
+    metricas_reg(train_reg_prep$price, pred_r2_train),
+    metricas_reg(test_reg_prep$price,  pred_r2_test)
+  )
+)
+print(tabla_reg)
+```
+
+```{r grafico-metricas-reg}
+library(tidyr)
+
+tabla_reg_long <- tabla_reg %>%
+  pivot_longer(cols = c(RMSE, MAE, R2),
+               names_to = "Metrica", values_to = "Valor")
+
+ggplot(tabla_reg_long %>% filter(Conjunto == "Prueba"),
+       aes(x = Modelo, y = Valor, fill = Modelo)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = round(Valor, 3)), vjust = -0.4, size = 3.5) +
+  facet_wrap(~ Metrica, scales = "free_y") +
+  scale_fill_manual(values = c("#2980b9", "#8e44ad")) +
+  labs(title = "Métricas de regresión en conjunto de prueba",
+       x = "", y = "Valor") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+```
+
+```{r grafico-pred-real}
+df_pred <- data.frame(
+  Real        = c(test_reg_prep$price, test_reg_prep$price),
+  Prediccion  = c(pred_r1_test, pred_r2_test),
+  Modelo      = rep(c("R1: nnet (sigmoide)", "R2: neuralnet (tanh)"),
+                    each = nrow(test_reg_prep))
+)
+
+ggplot(df_pred, aes(x = Real, y = Prediccion, color = Modelo)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black") +
+  facet_wrap(~ Modelo) +
+  scale_color_manual(values = c("#2980b9", "#8e44ad")) +
+  labs(title = "Precio real vs. predicho — modelos de regresión RNA",
+       x = "Precio real (USD)", y = "Precio predicho (USD)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+**Interpretación:**
+
+- El modelo con menor RMSE y MAE en prueba, y mayor R², es el que mejor
+  predice el precio de los listings.
+- La gráfica de dispersión "real vs. predicho" permite observar si las
+  predicciones se concentran cerca de la diagonal perfecta (línea punteada)
+  o si existe sesgo sistemático hacia algún rango de precios.
+- Se espera que el Modelo R2 (mayor capacidad con dos capas ocultas) capture
+  relaciones más complejas, aunque también es más propenso al sobreajuste si
+  `decay` no es suficiente.
+
+---
+
+## 12. Análisis de sobreajuste — curvas de aprendizaje
+
+Para detectar sobreajuste en los modelos de regresión se construye una
+**curva de aprendizaje**: se entrena el modelo con subconjuntos de tamaño
+creciente y se registra el RMSE en entrenamiento y en prueba. Un modelo
+sobreajustado muestra RMSE de entrenamiento muy bajo y RMSE de prueba
+significativamente mayor.
+
+```{r curva-aprendizaje}
+set.seed(42)
+
+proporciones <- seq(0.10, 1.0, by = 0.10)
+
+curva_aprendizaje <- function(modelo_fn, prop_vec,
+                              train_data, test_data,
+                              pred_data_fn, vars_pred) {
+  resultados <- lapply(prop_vec, function(p) {
+    n_sub   <- max(10, round(p * nrow(train_data)))
+    idx_sub <- sample(nrow(train_data), n_sub)
+    sub     <- train_data[idx_sub, ]
+
+    m   <- modelo_fn(sub)
+    ptr <- pred_data_fn(m, sub,        vars_pred)
+    pte <- pred_data_fn(m, test_data,  vars_pred)
+
+    rtr <- sqrt(mean((sub$price - ptr)^2))
+    rte <- sqrt(mean((test_data$price - pte)^2))
+    data.frame(Prop = p, N = n_sub, RMSE_Train = rtr, RMSE_Test = rte)
+  })
+  do.call(rbind, resultados)
+}
+
+# Funciones de ajuste y predicción para cada modelo
+fn_r1 <- function(dat) {
+  nnet(price ~ ., data = dat, size = 8, decay = 0.01,
+       linout = TRUE, maxit = 300, trace = FALSE)
+}
+pred_r1_fn <- function(m, dat, vp) as.vector(predict(m, newdata = dat))
+
+fn_r2 <- function(dat) {
+  f <- as.formula(paste("price ~", paste(vars_pred_reg, collapse = " + ")))
+  neuralnet(f, data = dat, hidden = c(10, 5), act.fct = "tanh",
+            linear.output = TRUE, stepmax = 5e5, threshold = 0.5)
+}
+pred_r2_fn <- function(m, dat, vp) {
+  neuralnet::compute(m, dat[, vp])$net.result[, 1]
+}
+
+curva_r1 <- curva_aprendizaje(fn_r1, proporciones,
+                               train_reg_prep, test_reg_prep,
+                               pred_r1_fn, vars_pred_reg)
+curva_r2 <- curva_aprendizaje(fn_r2, proporciones,
+                               train_reg_prep, test_reg_prep,
+                               pred_r2_fn, vars_pred_reg)
+
+curva_r1$Modelo <- "R1: nnet (sigmoide)"
+curva_r2$Modelo <- "R2: neuralnet (tanh)"
+curvas_todas <- rbind(curva_r1, curva_r2)
+```
+
+```{r plot-curva-aprendizaje}
+curvas_long <- curvas_todas %>%
+  pivot_longer(cols = c(RMSE_Train, RMSE_Test),
+               names_to = "Conjunto", values_to = "RMSE") %>%
+  mutate(Conjunto = recode(Conjunto,
+                           "RMSE_Train" = "Entrenamiento",
+                           "RMSE_Test"  = "Prueba"))
+
+ggplot(curvas_long, aes(x = N, y = RMSE, color = Conjunto, linetype = Conjunto)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ Modelo, scales = "free_y") +
+  scale_color_manual(values = c("Entrenamiento" = "#3498db",
+                                "Prueba"        = "#e74c3c")) +
+  labs(title = "Curvas de aprendizaje — modelos de regresión RNA",
+       x = "Tamaño del conjunto de entrenamiento",
+       y = "RMSE", color = "", linetype = "") +
+  theme_minimal()
+```
+
+```{r tabla-sobreajuste-reg}
+tabla_ov_reg <- data.frame(
+  Modelo        = c("R1: nnet (sigmoide, 8 neur.)",
+                    "R2: neuralnet (tanh, 10-5)"),
+  RMSE_Train    = c(round(sqrt(mean((train_reg_prep$price - pred_r1_train)^2)), 4),
+                    round(sqrt(mean((train_reg_prep$price - pred_r2_train)^2)), 4)),
+  RMSE_Test     = c(round(sqrt(mean((test_reg_prep$price  - pred_r1_test)^2)),  4),
+                    round(sqrt(mean((test_reg_prep$price  - pred_r2_test)^2)),  4))
+) %>%
+  mutate(
+    Ratio       = round(RMSE_Test / RMSE_Train, 4),
+    Diagnostico = case_when(
+      Ratio > 1.20 ~ "Sobreajuste",
+      RMSE_Train > quantile(test_reg_prep$price, 0.75) ~ "Desajuste",
+      TRUE         ~ "Buen ajuste"
+    )
+  )
+print(tabla_ov_reg)
+```
+
+**Interpretación de las curvas:**
+
+- Si la brecha entre la curva de prueba y la de entrenamiento **se cierra** a
+  medida que crece el conjunto de entrenamiento, el sobreajuste es moderado y
+  podría reducirse con más datos.
+- Si la curva de prueba permanece **sistemáticamente alta** y la de
+  entrenamiento baja, hay sobreajuste estructural que requiere reducir la
+  complejidad del modelo o aumentar `decay`.
+- Un Ratio RMSE\_Test / RMSE\_Train superior a 1.20 se toma como señal de
+  sobreajuste relevante.
+
+---
+
