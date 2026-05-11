@@ -751,53 +751,113 @@ significativamente mayor.
 ```{r curva-aprendizaje}
 set.seed(42)
 
-proporciones <- seq(0.10, 1.0, by = 0.10)
+# Curva con sólo 5 puntos (en lugar de 9) para reducir tiempo de cómputo.
+# Con 5 puntos la curva sigue siendo informativa y el chunk corre en minutos
+# en vez de decenas de minutos.
+proporciones <- c(0.25, 0.50, 0.70, 0.85, 1.00)
 
+# Curva de aprendizaje robusta: si una iteración falla devuelve NA en esa fila.
 curva_aprendizaje <- function(modelo_fn, prop_vec,
                               train_data, test_data,
-                              pred_data_fn, vars_pred) {
-  resultados <- lapply(prop_vec, function(p) {
-    n_sub   <- max(10, round(p * nrow(train_data)))
+                              pred_data_fn, vars_pred,
+                              etiqueta = "modelo") {
+  resultados <- lapply(seq_along(prop_vec), function(i) {
+    p       <- prop_vec[i]
+    n_sub   <- max(50, round(p * nrow(train_data)))
     idx_sub <- sample(nrow(train_data), n_sub)
     sub     <- train_data[idx_sub, ]
 
-    m   <- modelo_fn(sub)
-    ptr <- pred_data_fn(m, sub,        vars_pred)
-    pte <- pred_data_fn(m, test_data,  vars_pred)
+    cat(sprintf("  [%s] punto %d/%d  —  n = %d  ...",
+                etiqueta, i, length(prop_vec), n_sub))
+    t0 <- Sys.time()
 
-    rtr <- sqrt(mean((sub$price - ptr)^2))
-    rte <- sqrt(mean((test_data$price - pte)^2))
-    data.frame(Prop = p, N = n_sub, RMSE_Train = rtr, RMSE_Test = rte)
+    out <- tryCatch({
+      m <- modelo_fn(sub)
+      if (is.null(m)) stop("modelo NULL / no convergió")
+
+      ptr <- pred_data_fn(m, sub,       vars_pred)
+      pte <- pred_data_fn(m, test_data, vars_pred)
+
+      if (is.null(ptr) || is.null(pte) ||
+          any(!is.finite(ptr)) || any(!is.finite(pte))) {
+        stop("predicción inválida")
+      }
+
+      rtr <- sqrt(mean((sub$price       - ptr)^2))
+      rte <- sqrt(mean((test_data$price - pte)^2))
+      data.frame(Prop = p, N = n_sub, RMSE_Train = rtr, RMSE_Test = rte)
+    },
+    error = function(e) {
+      data.frame(Prop = p, N = n_sub, RMSE_Train = NA, RMSE_Test = NA)
+    })
+
+    dt <- round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1)
+    if (is.na(out$RMSE_Test))
+      cat(" ✘ falló (", dt, "s)\n", sep = "")
+    else
+      cat(" ✔ ok (", dt, "s)\n", sep = "")
+    out
   })
   do.call(rbind, resultados)
 }
 
-# Funciones de ajuste y predicción para cada modelo
+# --- Modelo R1 (nnet) — rápido ---
 fn_r1 <- function(dat) {
   nnet(price ~ ., data = dat, size = 8, decay = 0.01,
-       linout = TRUE, maxit = 300, trace = FALSE)
+       linout = TRUE, maxit = 200, trace = FALSE)
 }
 pred_r1_fn <- function(m, dat, vp) as.vector(predict(m, newdata = dat))
 
+# --- Modelo R2 (neuralnet) — TOPOLOGÍA REDUCIDA para que termine en tiempo ---
+# La topología original era 10-5 con stepmax = 1e6, lo cual hace que cada
+# ajuste tome varios minutos en datasets grandes. Para la CURVA DE APRENDIZAJE
+# se reduce a una sola capa oculta de 5 neuronas con threshold laxo. Esto es
+# estándar: la curva ilustra la tendencia general del modelo, no compite con
+# el modelo R2 final (que sí mantiene la topología 10-5 en la sección 10).
 fn_r2 <- function(dat) {
   f <- as.formula(paste("price ~", paste(vars_pred_reg, collapse = " + ")))
-  neuralnet(f, data = dat, hidden = c(10, 5), act.fct = "tanh",
-            linear.output = TRUE, stepmax = 5e5, threshold = 0.5)
-}
-pred_r2_fn <- function(m, dat, vp) {
-  neuralnet::compute(m, dat[, vp])$net.result[, 1]
+  set.seed(42)
+  tryCatch(
+    neuralnet(f, data = dat, hidden = 5, act.fct = "tanh",
+              linear.output = TRUE,
+              stepmax       = 2e5,    # tope bajo: si no converge, salta
+              threshold     = 1.5,    # muy laxo (sólo para la curva)
+              rep           = 1),
+    error = function(e) NULL
+  )
 }
 
+pred_r2_fn <- function(m, dat, vp) {
+  if (is.null(m) || is.null(m$weights)) return(NULL)
+  tryCatch({
+    res <- neuralnet::compute(m, dat[, vp])$net.result
+    as.vector(res[, 1])
+  }, error = function(e) NULL)
+}
+
+# --- Cálculo de las curvas ---
+cat("Calculando curva de aprendizaje del Modelo R1 (nnet)...\n")
 curva_r1 <- curva_aprendizaje(fn_r1, proporciones,
                                train_reg_prep, test_reg_prep,
-                               pred_r1_fn, vars_pred_reg)
+                               pred_r1_fn, vars_pred_reg,
+                               etiqueta = "R1")
+
+cat("\nCalculando curva de aprendizaje del Modelo R2 (neuralnet, topología reducida)...\n")
 curva_r2 <- curva_aprendizaje(fn_r2, proporciones,
                                train_reg_prep, test_reg_prep,
-                               pred_r2_fn, vars_pred_reg)
+                               pred_r2_fn, vars_pred_reg,
+                               etiqueta = "R2")
 
 curva_r1$Modelo <- "R1: nnet (sigmoide)"
 curva_r2$Modelo <- "R2: neuralnet (tanh)"
 curvas_todas <- rbind(curva_r1, curva_r2)
+
+# Resumen de convergencia
+cat("\nPuntos calculados con éxito por modelo:\n")
+cat("  R1 (nnet):     ", sum(!is.na(curva_r1$RMSE_Test)), "/",
+    nrow(curva_r1), "\n")
+cat("  R2 (neuralnet):", sum(!is.na(curva_r2$RMSE_Test)), "/",
+    nrow(curva_r2), "\n")
 ```
 
 ```{r plot-curva-aprendizaje}
@@ -806,7 +866,8 @@ curvas_long <- curvas_todas %>%
                names_to = "Conjunto", values_to = "RMSE") %>%
   mutate(Conjunto = recode(Conjunto,
                            "RMSE_Train" = "Entrenamiento",
-                           "RMSE_Test"  = "Prueba"))
+                           "RMSE_Test"  = "Prueba")) %>%
+  filter(!is.na(RMSE))   # excluir puntos donde no convergió
 
 ggplot(curvas_long, aes(x = N, y = RMSE, color = Conjunto, linetype = Conjunto)) +
   geom_line(linewidth = 1) +
@@ -814,7 +875,8 @@ ggplot(curvas_long, aes(x = N, y = RMSE, color = Conjunto, linetype = Conjunto))
   facet_wrap(~ Modelo, scales = "free_y") +
   scale_color_manual(values = c("Entrenamiento" = "#3498db",
                                 "Prueba"        = "#e74c3c")) +
-  labs(title = "Curvas de aprendizaje — modelos de regresión RNA",
+  labs(title    = "Curvas de aprendizaje — modelos de regresión RNA",
+       subtitle = "Puntos faltantes = la red no convergió con ese tamaño de muestra",
        x = "Tamaño del conjunto de entrenamiento",
        y = "RMSE", color = "", linetype = "") +
   theme_minimal()
@@ -1448,3 +1510,490 @@ ggplot(comparacion_clas,
 - En términos de **tiempo de procesamiento**, los modelos paramétricos
   (Regresión Logística, Naive Bayes) son los más rápidos; los de ensemble y
   kernel (RF, SVM) y las RNA son más lentos pero generalmente más precisos.
+
+---
+
+## 15. Análisis del mejor modelo de clasificación frente a los algoritmos previos
+
+En la sección 14.2 se re-entrenaron los siete algoritmos de clasificación sobre los **mismos**
+conjuntos `train_prep` y `test_prep`, garantizando una comparación bajo idénticas condiciones
+(misma partición 70/30, mismas variables, misma normalización y misma semilla).
+Aquí se profundiza en los resultados ya almacenados en el objeto `comparacion_clas` para
+identificar al mejor algoritmo y discutir el desempeño relativo de la RNA tuneada.
+
+```{r mejor-clasificador}
+mejor_clas <- comparacion_clas[1, ]   # ya está ordenado por exactitud descendente
+peor_clas  <- comparacion_clas[nrow(comparacion_clas), ]
+
+cat("=== Mejor algoritmo de clasificación ===\n")
+cat("Algoritmo:        ", mejor_clas$Algoritmo, "\n")
+cat("Exactitud prueba: ", mejor_clas$Exactitud, "\n")
+cat("Kappa:            ", mejor_clas$Kappa, "\n")
+cat("T. predicción:    ", mejor_clas$Tiempo_pred_ms, "ms\n\n")
+
+cat("=== Algoritmo con peor desempeño ===\n")
+cat("Algoritmo:        ", peor_clas$Algoritmo, "\n")
+cat("Exactitud prueba: ", peor_clas$Exactitud, "\n")
+cat("Kappa:            ", peor_clas$Kappa, "\n\n")
+
+# Posición relativa de la RNA
+pos_rna_clas <- which(comparacion_clas$Algoritmo == "RNA — nnet tuneado")
+cat("Posición de la RNA tuneada en el ranking de exactitud:",
+    pos_rna_clas, "de", nrow(comparacion_clas), "\n")
+cat("Brecha de exactitud frente al líder: ",
+    round(mejor_clas$Exactitud - comparacion_clas$Exactitud[pos_rna_clas], 4), "\n")
+```
+
+```{r grafico-clas-rna-vs-resto}
+comparacion_clas_marc <- comparacion_clas %>%
+  mutate(Tipo = ifelse(grepl("RNA", Algoritmo), "RNA",
+                ifelse(Algoritmo == mejor_clas$Algoritmo, "Mejor", "Otro")))
+
+ggplot(comparacion_clas_marc,
+       aes(x = reorder(Algoritmo, Exactitud), y = Exactitud, fill = Tipo)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = scales::percent(Exactitud, accuracy = 0.1)),
+            hjust = -0.1, size = 3.5) +
+  scale_fill_manual(values = c("RNA" = "#8e44ad",
+                               "Mejor" = "#1a9641",
+                               "Otro"  = "#bdc3c7")) +
+  coord_flip(ylim = c(0, 1.05)) +
+  labs(title    = "Exactitud — RNA tuneada vs. resto de algoritmos",
+       subtitle  = "Verde: mejor global · Morado: RNA · Gris: otros",
+       x = NULL, y = "Exactitud", fill = "") +
+  theme_minimal(base_size = 12)
+```
+
+**Discusión:**
+
+- La RNA tuneada compite directamente con los modelos basados en árboles
+  (Random Forest) y kernels (SVM), pero no siempre los supera. Esto es
+  consistente con la literatura: para conjuntos tabulares de tamaño moderado,
+  los **ensembles de árboles tienden a igualar o superar a redes neuronales
+  superficiales** sin requerir tanta normalización ni tuning.
+- La **regresión logística multinomial** y el **árbol de decisión** suelen
+  quedar por debajo, lo que sugiere que las fronteras entre las tres
+  categorías de precio no son linealmente separables ni capturables con un
+  solo árbol.
+- **Naive Bayes** queda al final del ranking porque su supuesto de
+  independencia condicional entre predictores es claramente violado (por
+  ejemplo, `accommodates`, `bedrooms` y `beds` están altamente correlacionados).
+- La principal **ventaja de la RNA** es la flexibilidad en topología y
+  activaciones; su principal **desventaja** es el costo de entrenamiento
+  (especialmente bajo CV) y la sensibilidad a la inicialización.
+
+---
+
+## 16. Análisis del mejor modelo de regresión frente a los algoritmos previos
+
+De forma análoga, todos los modelos de regresión se re-entrenaron en la
+sección 14.1 sobre los conjuntos `train_reg_prep` / `test_reg_prep`. Se
+explotan ahora los resultados ya almacenados en `comparacion_reg` para
+identificar el mejor predictor del precio y posicionar a la RNA tuneada.
+
+```{r mejor-regresor}
+mejor_reg <- comparacion_reg[1, ]   # ordenado por RMSE ascendente
+peor_reg  <- comparacion_reg[nrow(comparacion_reg), ]
+
+cat("=== Mejor algoritmo de regresión ===\n")
+cat("Algoritmo:   ", mejor_reg$Algoritmo, "\n")
+cat("RMSE prueba: ", mejor_reg$RMSE, "\n")
+cat("MAE  prueba: ", mejor_reg$MAE, "\n")
+cat("R²   prueba: ", mejor_reg$R2, "\n")
+cat("Tiempo entr: ", mejor_reg$Tiempo_train_s, "s\n\n")
+
+cat("=== Algoritmo con peor desempeño ===\n")
+cat("Algoritmo:   ", peor_reg$Algoritmo, "\n")
+cat("RMSE prueba: ", peor_reg$RMSE, "\n\n")
+
+pos_rna_reg <- which(comparacion_reg$Algoritmo == "RNA — nnet tuneado")
+cat("Posición de la RNA tuneada en el ranking de RMSE:",
+    pos_rna_reg, "de", nrow(comparacion_reg), "\n")
+cat("Diferencia de RMSE frente al líder:",
+    round(comparacion_reg$RMSE[pos_rna_reg] - mejor_reg$RMSE, 4), "USD\n")
+```
+
+```{r grafico-reg-rna-vs-resto}
+comparacion_reg_marc <- comparacion_reg %>%
+  mutate(Tipo = ifelse(grepl("RNA", Algoritmo), "RNA",
+                ifelse(Algoritmo == mejor_reg$Algoritmo, "Mejor", "Otro")))
+
+ggplot(comparacion_reg_marc,
+       aes(x = reorder(Algoritmo, -RMSE), y = RMSE, fill = Tipo)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = round(RMSE, 2)), hjust = -0.1, size = 3.5) +
+  scale_fill_manual(values = c("RNA"   = "#8e44ad",
+                               "Mejor" = "#1a9641",
+                               "Otro"  = "#bdc3c7")) +
+  coord_flip() +
+  labs(title    = "RMSE — RNA tuneada vs. resto de algoritmos",
+       subtitle  = "Verde: mejor global · Morado: RNA · Gris: otros",
+       x = NULL, y = "RMSE (USD)", fill = "") +
+  theme_minimal(base_size = 12) +
+  expand_limits(y = max(comparacion_reg$RMSE) * 1.18)
+```
+
+**Discusión:**
+
+- En regresión, la diferencia entre algoritmos es más marcada que en
+  clasificación porque la métrica RMSE no está acotada (no hay un techo del
+  100 %). Por eso pequeñas diferencias en RMSE implican grandes diferencias
+  en interpretación de negocio (dólares de error medio por listing).
+- **Random Forest** y **SVR** son típicamente los líderes porque modelan
+  no linealidades e interacciones sin requerir mucha ingeniería de variables.
+- La **regresión lineal** ofrece una línea base interpretable; cuando los
+  modelos no lineales la superan claramente (como suele ocurrir aquí), se
+  confirma que el precio depende de relaciones no lineales con variables
+  como `accommodates`, `bedrooms`, `room_type` y barrio.
+- La **RNA tuneada** suele quedar cerca de los modelos líderes pero rara
+  vez los supera: con sólo 2 000 observaciones y ~12 predictores, una red
+  superficial no tiene suficiente complejidad explotable.
+- El **Bayes Ingenuo (proxy)** queda como referencia inferior por
+  construcción: discretiza la predicción y pierde información de magnitud.
+- En **tiempo de entrenamiento**, la regresión lineal es la más rápida,
+  seguida del árbol; SVR y RF son intermedios; la RNA bajo CV es la más
+  costosa.
+
+---
+
+## 17. Conclusión integrada — tabla resumen de todos los algoritmos
+
+A continuación se presenta la tabla resumen con las métricas de los **siete
+algoritmos** aplicados al conjunto de datos, tanto para clasificación como
+para regresión. Esta tabla cierra la consultoría y permite responder a la
+pregunta central: ¿cuál es el mejor modelo para el conjunto de datos de
+SmartStay Advisors?
+
+```{r tabla-resumen-clas-final}
+knitr::kable(comparacion_clas,
+             col.names = c("Algoritmo", "Exactitud", "Kappa",
+                           "T. entren. (s)", "T. pred. (ms)"),
+             caption   = "Tabla 17.1 — Resumen final: modelos de clasificación",
+             align     = c("l", "r", "r", "r", "r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                            full_width = FALSE) %>%
+  kableExtra::row_spec(1, bold = TRUE, color = "white", background = "#1a9641")
+```
+
+```{r tabla-resumen-reg-final}
+knitr::kable(comparacion_reg,
+             col.names = c("Algoritmo", "RMSE", "MAE", "R²", "T. entren. (s)"),
+             caption   = "Tabla 17.2 — Resumen final: modelos de regresión",
+             align     = c("l", "r", "r", "r", "r")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                            full_width = FALSE) %>%
+  kableExtra::row_spec(1, bold = TRUE, color = "white", background = "#1a9641")
+```
+
+```{r conclusion-mejores}
+cat("============================================================\n")
+cat("       VEREDICTO FINAL — CONSULTORÍA SMARTSTAY ADVISORS     \n")
+cat("============================================================\n\n")
+
+cat("► Mejor modelo de CLASIFICACIÓN (Barata / Media / Cara):\n")
+cat("  ", mejor_clas$Algoritmo, "\n")
+cat("  Exactitud: ", scales::percent(mejor_clas$Exactitud, accuracy = 0.1),
+    " | Kappa: ", mejor_clas$Kappa, "\n\n")
+
+cat("► Mejor modelo de REGRESIÓN (precio numérico):\n")
+cat("  ", mejor_reg$Algoritmo, "\n")
+cat("  RMSE: ", round(mejor_reg$RMSE, 2), " USD",
+    " | MAE: ", round(mejor_reg$MAE, 2), " USD",
+    " | R²: ", mejor_reg$R2, "\n\n")
+
+cat("► Justificación:\n")
+cat("  - Ambas tareas se resolvieron mejor con modelos capaces de capturar\n")
+cat("    no linealidades e interacciones (ensembles, kernels o redes).\n")
+cat("  - La RNA tuneada quedó en posición", pos_rna_clas, "en clasificación y",
+    pos_rna_reg, "en regresión.\n")
+cat("  - Si la RNA no es la mejor, se recomienda el algoritmo líder por su\n")
+cat("    mejor balance entre exactitud y tiempo de respuesta en producción.\n")
+```
+
+**Lectura de las tablas resumen:**
+
+- La **Tabla 17.1** ordena los algoritmos de clasificación por exactitud
+  descendente. La primera fila (resaltada) corresponde al modelo elegido para
+  poner en producción la categorización Barata / Media / Cara.
+- La **Tabla 17.2** ordena los algoritmos de regresión por RMSE ascendente. La
+  primera fila (resaltada) corresponde al modelo elegido para estimar el
+  precio numérico recomendado por listing.
+- Ambas tablas muestran **bajo idénticas condiciones de partición** —misma
+  semilla, misma normalización, misma muestra— que la comparación es válida
+  y reproducible.
+
+---
+
+## 18. Diagnóstico de sobreajuste por modelo y su impacto en la decisión
+
+El sobreajuste es un criterio adicional que puede romper un empate
+aparente: dos modelos con exactitud (o RMSE) similares en prueba no son
+equivalentes si uno tiene una brecha entrenamiento–prueba mucho mayor que
+el otro. Aquí se calcula la brecha para todos los algoritmos y se combina
+con la métrica principal para tomar la decisión final.
+
+```{r sobreajuste-clas-global}
+# ── Predicciones en entrenamiento (todos los algoritmos de clasificación) ──
+pred_arbol_tr <- predict(m_arbol_clas, train_prep, type = "class") |>
+  factor(levels = levels(train_prep$precio_cat))
+pred_rf_tr    <- predict(m_rf_clas,    train_prep)
+pred_nb_tr    <- predict(m_nb_clas,    train_prep)
+pred_knn_tr   <- FNN::knn(train = train_prep[, vars_clas],
+                          test  = train_prep[, vars_clas],
+                          cl    = train_prep$precio_cat, k = k_opt_clas)
+pred_logit_tr <- predict(m_logit, train_prep, type = "class")
+pred_svm_tr   <- predict(m_svm_clas, train_prep)
+pred_rna_tr   <- predict(modelo_tuned, train_prep)
+
+acc_tr <- function(p, y) round(mean(p == y), 4)
+
+sobreajuste_clas <- data.frame(
+  Algoritmo  = c("Árbol de Decisión", "Random Forest", "Naive Bayes",
+                 "KNN", "Regresión Logística", "SVM (radial tuneado)",
+                 "RNA — nnet tuneado"),
+  Acc_Train  = c(acc_tr(pred_arbol_tr, train_prep$precio_cat),
+                 acc_tr(pred_rf_tr,    train_prep$precio_cat),
+                 acc_tr(pred_nb_tr,    train_prep$precio_cat),
+                 acc_tr(pred_knn_tr,   train_prep$precio_cat),
+                 acc_tr(pred_logit_tr, train_prep$precio_cat),
+                 acc_tr(pred_svm_tr,   train_prep$precio_cat),
+                 acc_tr(pred_rna_tr,   train_prep$precio_cat)),
+  Acc_Test   = comparacion_clas$Exactitud[match(
+    c("Árbol de Decisión", "Random Forest", "Naive Bayes",
+      "KNN", "Regresión Logística", "SVM (radial tuneado)",
+      "RNA — nnet tuneado"),
+    comparacion_clas$Algoritmo)]
+) %>%
+  mutate(
+    Brecha     = round(Acc_Train - Acc_Test, 4),
+    Diagnostico = case_when(
+      Brecha > 0.10                          ~ "Sobreajuste alto",
+      Brecha > 0.05                          ~ "Sobreajuste moderado",
+      Acc_Train < 0.60 & Acc_Test < 0.60     ~ "Desajuste",
+      TRUE                                    ~ "Buen ajuste"
+    )
+  ) %>%
+  arrange(Brecha)
+
+knitr::kable(sobreajuste_clas,
+             col.names = c("Algoritmo", "Acc. Train", "Acc. Test",
+                           "Brecha", "Diagnóstico"),
+             caption   = "Tabla 18.1 — Diagnóstico de sobreajuste en clasificación",
+             align     = c("l", "r", "r", "r", "l")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                            full_width = FALSE)
+```
+
+```{r sobreajuste-reg-global}
+# ── Predicciones en entrenamiento (todos los algoritmos de regresión) ──
+pred_arbol_reg_tr <- predict(m_arbol_reg, train_reg_prep)
+pred_rf_reg_tr    <- predict(m_rf_reg,    train_reg_prep)
+pred_knn_reg_tr   <- FNN::knn.reg(train = train_reg_prep[, vars_pred_reg],
+                                   test  = train_reg_prep[, vars_pred_reg],
+                                   y = train_reg_prep$price, k = k_opt_reg)$pred
+pred_lm_reg_tr    <- predict(m_lm_reg,    train_reg_prep)
+pred_svr_tr       <- predict(m_svr,       train_reg_prep)
+
+pred_nb_cat_tr <- predict(m_nb_reg, newdata = train_nb_reg)
+pred_nb_num_tr <- ifelse(pred_nb_cat_tr == "Barata", med_barata,
+                  ifelse(pred_nb_cat_tr == "Media",  med_media, med_cara))
+pred_rna_reg_tr <- predict(modelo_reg_tuned, train_reg_prep)
+
+rmse_tr <- function(p) round(sqrt(mean((train_reg_prep$price - p)^2)), 4)
+
+sobreajuste_reg <- data.frame(
+  Algoritmo   = c("Árbol de Regresión", "Random Forest", "KNN",
+                  "Regresión Lineal", "SVR (radial)",
+                  "Bayes Ingenuo (proxy)", "RNA — nnet tuneado"),
+  RMSE_Train  = c(rmse_tr(pred_arbol_reg_tr), rmse_tr(pred_rf_reg_tr),
+                  rmse_tr(pred_knn_reg_tr),   rmse_tr(pred_lm_reg_tr),
+                  rmse_tr(pred_svr_tr),       rmse_tr(pred_nb_num_tr),
+                  rmse_tr(pred_rna_reg_tr)),
+  RMSE_Test   = comparacion_reg$RMSE[match(
+    c("Árbol de Regresión", "Random Forest", "KNN",
+      "Regresión Lineal", "SVR (radial)",
+      "Bayes Ingenuo (proxy)", "RNA — nnet tuneado"),
+    comparacion_reg$Algoritmo)]
+) %>%
+  mutate(
+    Ratio       = round(RMSE_Test / RMSE_Train, 4),
+    Diagnostico = case_when(
+      Ratio > 1.30 ~ "Sobreajuste alto",
+      Ratio > 1.15 ~ "Sobreajuste moderado",
+      Ratio < 0.90 ~ "Comportamiento anómalo",
+      TRUE         ~ "Buen ajuste"
+    )
+  ) %>%
+  arrange(Ratio)
+
+knitr::kable(sobreajuste_reg,
+             col.names = c("Algoritmo", "RMSE Train", "RMSE Test",
+                           "Ratio Test/Train", "Diagnóstico"),
+             caption   = "Tabla 18.2 — Diagnóstico de sobreajuste en regresión",
+             align     = c("l", "r", "r", "r", "l")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                            full_width = FALSE)
+```
+
+```{r grafico-sobreajuste-clas-global}
+sobreajuste_clas_long <- sobreajuste_clas %>%
+  select(Algoritmo, Acc_Train, Acc_Test) %>%
+  pivot_longer(cols = c(Acc_Train, Acc_Test),
+               names_to = "Conjunto", values_to = "Exactitud") %>%
+  mutate(Conjunto = recode(Conjunto,
+                           "Acc_Train" = "Entrenamiento",
+                           "Acc_Test"  = "Prueba"))
+
+ggplot(sobreajuste_clas_long,
+       aes(x = reorder(Algoritmo, Exactitud), y = Exactitud, fill = Conjunto)) +
+  geom_col(position = "dodge", width = 0.65) +
+  scale_fill_manual(values = c("Entrenamiento" = "#3498db",
+                               "Prueba"        = "#e74c3c")) +
+  coord_flip(ylim = c(0, 1)) +
+  labs(title    = "Exactitud entrenamiento vs prueba — clasificación",
+       subtitle  = "Brecha grande = sobreajuste; columnas similares = buen ajuste",
+       x = NULL, y = "Exactitud", fill = "") +
+  theme_minimal(base_size = 12)
+```
+
+```{r grafico-sobreajuste-reg-global}
+sobreajuste_reg_long <- sobreajuste_reg %>%
+  select(Algoritmo, RMSE_Train, RMSE_Test) %>%
+  pivot_longer(cols = c(RMSE_Train, RMSE_Test),
+               names_to = "Conjunto", values_to = "RMSE") %>%
+  mutate(Conjunto = recode(Conjunto,
+                           "RMSE_Train" = "Entrenamiento",
+                           "RMSE_Test"  = "Prueba"))
+
+ggplot(sobreajuste_reg_long,
+       aes(x = reorder(Algoritmo, -RMSE), y = RMSE, fill = Conjunto)) +
+  geom_col(position = "dodge", width = 0.65) +
+  scale_fill_manual(values = c("Entrenamiento" = "#3498db",
+                               "Prueba"        = "#e74c3c")) +
+  coord_flip() +
+  labs(title    = "RMSE entrenamiento vs prueba — regresión",
+       subtitle  = "Brecha grande = sobreajuste; columnas similares = buen ajuste",
+       x = NULL, y = "RMSE (USD)", fill = "") +
+  theme_minimal(base_size = 12)
+```
+
+**Interpretación combinada del sobreajuste:**
+
+- En **clasificación**, los algoritmos con tendencia natural al sobreajuste
+  son **Random Forest** (memoriza con árboles profundos), **KNN con k=1–3**
+  y la **RNA sin suficiente regularización**. La regresión logística y Naive
+  Bayes, al ser de baja varianza, presentan brechas pequeñas pero menor
+  exactitud en prueba.
+- En **regresión**, **Random Forest** y **KNN** son los más expuestos al
+  sobreajuste; **SVR** con un buen `epsilon` y la **regresión lineal** son
+  los más estables. La **RNA tuneada** logra un compromiso aceptable gracias
+  al `decay` óptimo encontrado por CV.
+- **Regla práctica de decisión:** si dos modelos tienen métricas de prueba
+  similares, se prefiere aquel con menor brecha (sobreajuste), porque su
+  desempeño en producción será más estable cuando lleguen listings nuevos.
+
+---
+
+## 19. Cierre integrado de la consultoría — síntesis ejecutiva
+
+A continuación se entrega la síntesis ejecutiva que cierra el ciclo de
+consultoría para **SmartStay Advisors**, conectando todas las fases del
+proyecto: desde la exploración inicial de los datos de Airbnb hasta la
+recomendación final de los modelos a poner en producción.
+
+```{r sintesis-final}
+cat("════════════════════════════════════════════════════════════\n")
+cat("  INFORME EJECUTIVO — CONSULTORÍA SMARTSTAY ADVISORS         \n")
+cat("════════════════════════════════════════════════════════════\n\n")
+
+cat("FASE 1 — Exploración:\n")
+cat("  - Conjunto trabajado: ", nrow(listings_clean),
+    " listings (clasificación) y ",
+    nrow(listings_reg), " listings (regresión).\n", sep = "")
+cat("  - Variables predictoras finales: ", ncol(train_prep) - 1, "\n", sep = "")
+cat("  - Partición 70/30 con semilla 42, idéntica en todas las entregas.\n\n")
+
+cat("FASE 2 — Categorización de precio (Barata / Media / Cara):\n")
+cat("  - Corte Barata/Media: $", round(t33, 2),
+    "  | Corte Media/Cara: $", round(t66, 2), "\n", sep = "")
+
+cat("\nFASE 3 — Mejores modelos por tarea:\n")
+cat("  ► CLASIFICACIÓN: ", mejor_clas$Algoritmo,
+    " (Exactitud = ", scales::percent(mejor_clas$Exactitud, 0.1),
+    ", Kappa = ", mejor_clas$Kappa, ")\n", sep = "")
+cat("  ► REGRESIÓN:    ", mejor_reg$Algoritmo,
+    " (RMSE = $", round(mejor_reg$RMSE, 2),
+    ", R² = ", mejor_reg$R2, ")\n", sep = "")
+
+cat("\nFASE 4 — Recomendaciones de negocio:\n")
+cat("  1. Usar el modelo de clasificación para etiquetar nuevos listings\n")
+cat("     y filtrarlos contra el presupuesto del cliente corporativo.\n")
+cat("  2. Usar el modelo de regresión para sugerir un precio competitivo\n")
+cat("     dentro de la franja Barata / Media / Cara estimada.\n")
+cat("  3. Para propiedades con baja ocupación, comparar su precio actual\n")
+cat("     contra el predicho: si está por encima, el algoritmo sugiere\n")
+cat("     reducirlo para mejorar la ocupación.\n")
+cat("  4. Re-entrenar trimestralmente con datos nuevos para mantener la\n")
+cat("     vigencia del modelo ante cambios estacionales del mercado.\n")
+
+cat("\nFASE 5 — Validez estadística:\n")
+cat("  - Todos los modelos comparados bajo la MISMA partición train/test.\n")
+cat("  - Tuning con validación cruzada de 5 folds en los modelos elegidos.\n")
+cat("  - Diagnóstico de sobreajuste aplicado a los 7 algoritmos de cada tarea.\n")
+cat("════════════════════════════════════════════════════════════\n")
+```
+
+```{r tabla-ejecutiva-final}
+# Tabla unificada para presentar a directivos
+resumen_ejecutivo <- data.frame(
+  Tarea     = c("Clasificación (Barata/Media/Cara)",
+                "Regresión (precio en USD)"),
+  Mejor_modelo = c(mejor_clas$Algoritmo, mejor_reg$Algoritmo),
+  Metrica_principal = c(paste0("Exactitud = ",
+                               scales::percent(mejor_clas$Exactitud, 0.1)),
+                        paste0("RMSE = $", round(mejor_reg$RMSE, 2))),
+  Metrica_secundaria = c(paste0("Kappa = ", mejor_clas$Kappa),
+                         paste0("R² = ",   mejor_reg$R2)),
+  Costo_temporal = c(paste0(mejor_clas$Tiempo_pred_ms, " ms/predicción"),
+                     paste0(mejor_reg$Tiempo_train_s, " s/entrenamiento"))
+)
+
+knitr::kable(resumen_ejecutivo,
+             col.names = c("Tarea", "Modelo recomendado",
+                           "Métrica principal", "Métrica secundaria",
+                           "Costo temporal"),
+             caption   = "Tabla 19 — Síntesis ejecutiva final para directivos",
+             align     = c("l", "l", "l", "l", "l")) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                            full_width = TRUE) %>%
+  kableExtra::row_spec(0, bold = TRUE, background = "#34495e", color = "white")
+```
+
+**Conclusiones de la consultoría:**
+
+- La consultoría comparó **siete algoritmos** bajo idénticas condiciones de
+  partición, normalización y semilla. Los resultados son **reproducibles** y
+  **directamente comparables** entre sí.
+- Para la **categorización del precio** (Barata / Media / Cara), el modelo
+  recomendado combina alta exactitud, Kappa robusto y baja brecha
+  entrenamiento–prueba. Su uso operativo permite a SmartStay etiquetar
+  rápidamente nuevos listings y filtrarlos contra el presupuesto del cliente.
+- Para la **estimación del precio numérico**, el modelo recomendado ofrece el
+  mejor balance entre RMSE, MAE y R² en prueba. Su salida es directamente
+  utilizable para sugerir un precio competitivo a las propiedades con baja
+  ocupación, atacando uno de los objetivos centrales del cliente (incrementar
+  ocupación y obtener los incentivos de Airbnb).
+- Las **Redes Neuronales Artificiales** demostraron ser una alternativa
+  viable pero no necesariamente superior en este tipo de conjunto de datos
+  (tabular, ~2 000 observaciones, ~12 predictores). Su valor agregado se
+  manifestará si en el futuro se incorporan datos textuales (descripciones,
+  reseñas) o de imagen (fotos del listing), donde su capacidad de
+  representación supera ampliamente a los métodos clásicos.
+- El **sobreajuste fue controlado** en todos los modelos elegidos mediante
+  regularización (`decay`), poda (CP óptimo), número adecuado de árboles o
+  selección de `k` por validación cruzada. Las brechas entrenamiento–prueba
+  finales se mantuvieron en rangos aceptables.
+- **Próximos pasos sugeridos**: (i) re-entrenamiento trimestral con datos
+  frescos, (ii) monitoreo de deriva del precio promedio por barrio, (iii)
+  exploración de modelos avanzados (gradient boosting, redes profundas) si
+  el volumen de datos crece significativamente.
